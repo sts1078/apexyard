@@ -19,9 +19,10 @@ SRC_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 HOOK_SRC="$SRC_ROOT/.claude/hooks/require-active-ticket.sh"
 LIB_BASH="$SRC_ROOT/.claude/hooks/_lib-detect-bash-write.sh"
 LIB_CFG="$SRC_ROOT/.claude/hooks/_lib-read-config.sh"
+LIB_PATH_RESOLVE="$SRC_ROOT/.claude/hooks/_lib-path-resolve.sh"
 DEFAULTS="$SRC_ROOT/.claude/project-config.defaults.json"
 
-for f in "$HOOK_SRC" "$LIB_BASH" "$LIB_CFG" "$DEFAULTS"; do
+for f in "$HOOK_SRC" "$LIB_BASH" "$LIB_CFG" "$LIB_PATH_RESOLVE" "$DEFAULTS"; do
   if [ ! -f "$f" ]; then
     echo "FAIL: required source missing: $f" >&2
     exit 1
@@ -49,6 +50,36 @@ make_sandbox() {
   cp "$HOOK_SRC" "$sb/.claude/hooks/require-active-ticket.sh"
   cp "$LIB_BASH" "$sb/.claude/hooks/_lib-detect-bash-write.sh"
   cp "$LIB_CFG"  "$sb/.claude/hooks/_lib-read-config.sh"
+  cp "$LIB_PATH_RESOLVE" "$sb/.claude/hooks/_lib-path-resolve.sh"
+  cp "$DEFAULTS" "$sb/.claude/project-config.defaults.json"
+  chmod +x "$sb/.claude/hooks/require-active-ticket.sh"
+  echo "$sb"
+}
+
+# Same as make_sandbox but DELIBERATELY OMITS _lib-path-resolve.sh — used
+# to pin the #1089 fail-closed degraded-mode behaviour (closing #1087's
+# LOW-2): with the lib missing, _resolve_real_path is undefined/stubbed to
+# echo nothing, so any target that would normally be resolved (and possibly
+# exempted) must instead fall through to the ordinary GATED path. See the
+# "#1089 fail-closed" cases below.
+make_sandbox_no_pathresolve() {
+  local sb
+  sb=$(mktemp -d)
+  (
+    cd "$sb" || exit 1
+    git init -q
+    git config user.email "test@example.com"
+    git config user.name "test"
+    : > onboarding.yaml
+    : > apexyard.projects.yaml
+    git add onboarding.yaml apexyard.projects.yaml
+    git commit -q -m "init"
+  )
+  mkdir -p "$sb/.claude/hooks" "$sb/.claude/session"
+  cp "$HOOK_SRC" "$sb/.claude/hooks/require-active-ticket.sh"
+  cp "$LIB_BASH" "$sb/.claude/hooks/_lib-detect-bash-write.sh"
+  cp "$LIB_CFG"  "$sb/.claude/hooks/_lib-read-config.sh"
+  # NOTE: _lib-path-resolve.sh intentionally NOT copied here.
   cp "$DEFAULTS" "$sb/.claude/project-config.defaults.json"
   chmod +x "$sb/.claude/hooks/require-active-ticket.sh"
   echo "$sb"
@@ -404,6 +435,7 @@ mkdir -p "$_t30_ops/.claude/hooks"
 cp "$HOOK_SRC"  "$_t30_ops/.claude/hooks/require-active-ticket.sh"
 cp "$LIB_BASH"  "$_t30_ops/.claude/hooks/_lib-detect-bash-write.sh"
 cp "$LIB_CFG"   "$_t30_ops/.claude/hooks/_lib-read-config.sh"
+cp "$LIB_PATH_RESOLVE" "$_t30_ops/.claude/hooks/_lib-path-resolve.sh"
 cp "$DEFAULTS"  "$_t30_ops/.claude/project-config.defaults.json"
 [ -f "$LIB_OPS_SRC" ]  && cp "$LIB_OPS_SRC"  "$_t30_ops/.claude/hooks/_lib-ops-root.sh"
 [ -f "$LIB_PORT_SRC" ] && cp "$LIB_PORT_SRC" "$_t30_ops/.claude/hooks/_lib-portfolio-paths.sh"
@@ -462,6 +494,480 @@ else
   echo "PASS [$_t30_label]"
   PASS=$((PASS+1))
 fi
+
+# --- Out-of-governance exemption (#883): the ~/.zshrc-style bug repro --
+#
+# Prior to #883, the "outside the repo" exemption (#569) only fired for
+# the Bash-write path — an Edit-tool write to a home dotfile like
+# ~/.zshrc was gated with no legitimate way to satisfy the gate on a fork
+# with GitHub Issues disabled (no tracker to file a chore ticket in).
+# These cases prove the fix (Edit/MultiEdit AND Bash, symlinks resolved,
+# governed-tree boundaries unchanged).
+
+# 31. Edit tool absolute write to a home-dotfile-style path OUTSIDE any
+#     git repo and OUTSIDE the ops fork, no ticket → EXEMPT. The core
+#     #883 repro.
+sb=$(make_sandbox)
+home_sim=$(mktemp -d)
+in=$(jq -nc --arg p "$home_sim/.zshrc" '{tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "#883 Edit-tool write to out-of-repo dotfile exempt (no ticket)" 0 "" "$in" "$sb"
+rm -rf "$home_sim"
+
+# 32. Same but MultiEdit tool shape (file_path key) → EXEMPT.
+sb=$(make_sandbox)
+home_sim=$(mktemp -d)
+in=$(jq -nc --arg p "$home_sim/.bashrc" '{tool_name:"MultiEdit", tool_input:{file_path:$p}}')
+run_case "#883 MultiEdit-tool write to out-of-repo dotfile exempt" 0 "" "$in" "$sb"
+rm -rf "$home_sim"
+
+# 33. Bash relative write from a CWD entirely outside any git repo /
+#     governed tree (simulates `cd ~ && echo 'export X=1' >> .zshrc`)
+#     → EXEMPT. Uses run_case_cwd so the hook actually executes with
+#     CWD=home_sim (not the sandbox) and has no session pin to fall back
+#     on — proving the exemption doesn't depend on the ops root being
+#     resolvable.
+sb=$(make_sandbox)
+home_sim=$(mktemp -d)
+in=$(jq -nc --arg c "echo 'export X=1' >> .zshrc" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case_cwd "#883 bash relative write from out-of-repo CWD exempt" 0 "" "$in" "$sb" "$home_sim"
+rm -rf "$home_sim"
+
+# 34. In-repo source Edit write is UNCHANGED — still blocked without a
+#     ticket (regression guard: the new exemption must not widen scope
+#     for governed content).
+sb=$(make_sandbox)
+mkdir -p "$sb/src"
+rsb=$(cd "$sb" && pwd -P)
+in=$(jq -nc --arg p "$rsb/src/app.ts" '{tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "#883 regression: in-repo Edit write still blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 35. Symlink from OUTSIDE the repo INTO the governed sandbox tree must
+#     NOT bypass the gate: resolving the write target's real path (not
+#     its literal path) is what fail-closed requires.
+sb=$(make_sandbox)
+rsb=$(cd "$sb" && pwd -P)
+mkdir -p "$sb/src"
+home_sim=$(mktemp -d)
+ln -s "$rsb" "$home_sim/link-into-repo"
+in=$(jq -nc --arg p "$home_sim/link-into-repo/src/app.ts" '{tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "#883 symlink into governed repo does NOT bypass gate" 2 "BLOCKED" "$in" "$sb"
+rm -rf "$home_sim"
+
+# 36. Symlink case WITH an active ticket → allowed (proves the symlink IS
+#     correctly resolved to governed content, and the normal ticket-gate
+#     logic — not the out-of-governance exemption — is what applies).
+sb=$(make_sandbox)
+rsb=$(cd "$sb" && pwd -P)
+mkdir -p "$sb/src"
+cat > "$sb/.claude/session/current-ticket" <<EOF
+repo=me2resh/apexyard
+number=883
+title=symlink test
+EOF
+home_sim=$(mktemp -d)
+ln -s "$rsb" "$home_sim/link-into-repo"
+in=$(jq -nc --arg p "$home_sim/link-into-repo/src/app.ts" '{tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "#883 symlink into governed repo allowed WITH active ticket" 0 "" "$in" "$sb"
+rm -rf "$home_sim"
+
+# 37. Workspace-project write (governed, even without its own .git) still
+#     blocks without a ticket — proves the explicit WORKSPACE_DIR check
+#     (not merely "is this a git repo") governs the boundary. Mirrors the
+#     #745 split-portfolio layout, where a workspace project clone may
+#     have no .git of its own.
+sb=$(make_sandbox)
+rsb=$(cd "$sb" && pwd -P)
+mkdir -p "$sb/workspace/myproj/src"
+in=$(jq -nc --arg p "$rsb/workspace/myproj/src/x.ts" '{tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "#883 workspace-project write (no .git) still blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 38. Unresolvable Bash write target (embedded interpreter, no
+#     extractable path) remains categorically gated — fail-closed,
+#     unchanged. The out-of-governance check must never fire on an empty
+#     FILE_PATH.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "python3 -c \"import pathlib,os; pathlib.Path(os.environ.get('HOME','/tmp')+'/.railsrc').write_text('x')\"" \
+  '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#883 unresolvable bash target stays gated (fail-closed)" 2 "BLOCKED" "$in" "$sb"
+
+# --- Security review finding on PR #885 (Hakim): symlinked-out non-git --
+# --- workspace project must NOT be exempted -----------------------------
+#
+# A registered workspace/<proj> that is ITSELF a symlink whose real
+# target lives OUTSIDE workspace/ in a directory that is not itself a git
+# repo used to be wrongly exempted: resolving the symlink made the
+# containment checks read "outside ops, outside workspace, not a git
+# repo" even though the RAW path plainly names a governed
+# workspace/<project> location. The fix evaluates ops/workspace
+# containment against BOTH the raw and the resolved target.
+
+# 39. workspace/proj -> <external non-git dir>; write through the raw
+#     workspace/proj path, no ticket → BLOCKED (was wrongly EXEMPT
+#     before the raw-AND-resolved fix).
+sb=$(make_sandbox)
+rsb=$(cd "$sb" && pwd -P)
+mkdir -p "$sb/workspace"
+external=$(mktemp -d)
+mkdir -p "$external/src"
+ln -s "$external" "$sb/workspace/proj"
+in=$(jq -nc --arg p "$rsb/workspace/proj/src/x.ts" '{tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "#885 symlinked-out non-git workspace project still blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+rm -rf "$external"
+
+# 40. Same symlinked-out workspace project, WITH an active ticket marker
+#     → ALLOWED. Keeps the existing "symlink governed content works with
+#     a ticket" behaviour coherent: the raw-containment check correctly
+#     routes this through the normal ticket-gate logic (not the
+#     out-of-governance exemption), and the ticket marker satisfies it.
+sb=$(make_sandbox)
+rsb=$(cd "$sb" && pwd -P)
+mkdir -p "$sb/workspace"
+external=$(mktemp -d)
+mkdir -p "$external/src"
+ln -s "$external" "$sb/workspace/proj"
+cat > "$sb/.claude/session/current-ticket" <<EOF
+repo=me2resh/apexyard
+number=885
+title=symlinked-out workspace project test
+EOF
+in=$(jq -nc --arg p "$rsb/workspace/proj/src/x.ts" '{tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "#885 symlinked-out non-git workspace project allowed WITH active ticket" 0 "" "$in" "$sb"
+rm -rf "$external"
+
+# --- #886: judge ALL bash write targets, not just the first ------------
+#
+# The bypass shape: a command names an out-of-repo (or otherwise exempt)
+# target FIRST and an in-repo target SECOND. Before #886, the hook judged
+# only the first extracted target — an exempt first target let the whole
+# command through even though it also wrote somewhere gated.
+
+# 41. Multi-target: /tmp (exempt) THEN src/app.ts (gated), no ticket →
+#     BLOCKED. This is the exact bypass the #885 review surfaced.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo a > /tmp/x; echo b > src/app.ts" \
+      '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 multi-target (out-of-repo then in-repo) blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 42. Same multi-target command, WITH an active ticket → ALLOWED (every
+#     target independently clears the gate).
+sb=$(make_sandbox)
+cat > "$sb/.claude/session/current-ticket" <<EOF
+repo=me2resh/apexyard
+number=886
+title=multi-target bash write test
+EOF
+in=$(jq -nc --arg c "echo a > /tmp/x; echo b > src/app.ts" \
+      '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 multi-target (out-of-repo then in-repo) allowed WITH ticket" 0 "" "$in" "$sb"
+
+# 43. Regression: a SINGLE out-of-repo target (no second target) remains
+#     exempt — the per-target loop must not become stricter than before
+#     for the plain single-target case.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo a > /tmp/x" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 regression: single out-of-repo target still exempt" 0 "" "$in" "$sb"
+
+# 44. Regression: a SINGLE in-repo target (no other target) remains gated
+#     w/o a ticket — same as before #886.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo a > src/app.ts" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 regression: single in-repo target still blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 45. tee naming BOTH an out-of-repo and an in-repo file in one invocation
+#     (`tee /tmp/a src/b.ts`) — both are targets of the SAME command, no
+#     ticket → BLOCKED on the in-repo one.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo x | tee /tmp/a src/b.ts" \
+      '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 tee with out-of-repo + in-repo operands blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# --- #886/#926: NO-SPACE separator+redirection (Hakim security-review) --
+#
+# `echo a > /tmp/ok;> .gitignore` — after splitting on `;`, the second
+# segment is `> .gitignore`, which BEGINS with `>`. The pre-fix regex
+# `[^|<&]>...` required a character before `>` to exist, so this second,
+# in-repo target was silently dropped and the whole command exempted on
+# the first (out-of-repo) target alone. These are Hakim's exact repro
+# strings, now expected to BLOCK.
+
+# 46. No-space `;` then redirect, no ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo a > /tmp/ok;> .gitignore" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 no-space ';' then redirect blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 47. Same command, WITH an active ticket → ALLOWED (both targets clear).
+sb=$(make_sandbox)
+cat > "$sb/.claude/session/current-ticket" <<EOF
+repo=me2resh/apexyard
+number=886
+title=no-space redirection bypass test
+EOF
+in=$(jq -nc --arg c "echo a > /tmp/ok;> .gitignore" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 no-space ';' then redirect allowed WITH ticket" 0 "" "$in" "$sb"
+
+# 48. No-space `;` + redirect with a trailing command appended, no ticket
+#     → BLOCKED (the trailing `cat /etc/hostname` must not swallow the
+#     dropped target or change the verdict).
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo a > /tmp/ok;> .gitignore cat /etc/hostname" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 no-space ';' + redirect with trailing command blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 49. No-space `&&` then redirect, no ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo a > /tmp/ok&&> .gitignore" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 no-space '&&' then redirect blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 50. No-space `|` then redirect, no ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo a > /tmp/ok|> .gitignore" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 no-space '|' then redirect blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 51. No-space `||` then redirect, no ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo a > /tmp/ok||> .gitignore" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 no-space '||' then redirect blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# --- #886/#926 round 3: &>, &>>, >|, >>| (Hakim adversarial re-hunt) ----
+#
+# The operator alternation only modelled `>`/`>>`/`n>` — it missed
+# `&>`/`&>>` (redirect BOTH streams to a file) and `>|`/`>>|`
+# (force-clobber, noclobber override). Both are real, destructive
+# truncating writes that were passing (exit 0) with no active ticket.
+
+# 52. `&>` (redirect-both-streams) into an in-repo file, no ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo hi &> .gitignore" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 '&>' redirect-both-streams blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 53. Same command, WITH an active ticket → ALLOWED.
+sb=$(make_sandbox)
+cat > "$sb/.claude/session/current-ticket" <<EOF
+repo=me2resh/apexyard
+number=886
+title=redirect-both-streams operator test
+EOF
+in=$(jq -nc --arg c "echo hi &> .gitignore" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 '&>' redirect-both-streams allowed WITH ticket" 0 "" "$in" "$sb"
+
+# 54. `&>>` (append-both-streams) into an in-repo file, no ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo hi &>> .gitignore" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 '&>>' append-both-streams blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 55. `>|` (force-clobber) after a no-space `;`, out-of-repo THEN in-repo,
+#     no ticket → BLOCKED on the in-repo (migration-shaped) target. This is
+#     Hakim's exact second repro.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo a > /tmp/ok;>| db/migrations/006.sql" \
+      '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 '>|' force-clobber blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 56. Same command, WITH an active ticket → ALLOWED (both targets clear).
+sb=$(make_sandbox)
+cat > "$sb/.claude/session/current-ticket" <<EOF
+repo=me2resh/apexyard
+number=886
+title=force-clobber operator test
+EOF
+in=$(jq -nc --arg c "echo a > /tmp/ok;>| db/migrations/006.sql" \
+      '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 '>|' force-clobber allowed WITH ticket" 0 "" "$in" "$sb"
+
+# 57. `>>|` (force-clobber-append) variant, no ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo a > /tmp/ok;>>| db/migrations/006.sql" \
+      '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 '>>|' force-clobber-append blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# --- Sanity: fd-dup / read forms must NOT be newly gated ---------------
+#
+# `>&2` / `2>&1` / `1>&2` are fd-duplication (redirecting one fd to
+# ANOTHER fd), never a file write — the broadened operator set must not
+# start treating them as write targets. `< file` is a plain read.
+
+# 58. `echo err >&2` (fd-dup only, no in-repo write) — no ticket, still
+#     ALLOWED (nothing here is a write target at all).
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo err >&2" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 sanity: '>&2' fd-dup alone is not gated" 0 "" "$in" "$sb"
+
+# 59. `make build 2>&1` — no ticket, still ALLOWED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "make build 2>&1" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 sanity: '2>&1' fd-dup alone is not gated" 0 "" "$in" "$sb"
+
+# 60. `cat < src/app.ts` — a plain READ of a tracked file, no ticket →
+#     still ALLOWED (reading is not gated; only writes are).
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "cat < src/app.ts" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 sanity: plain '<' read is not gated" 0 "" "$in" "$sb"
+
+# --- #886/#926 round 4: ZERO whitespace between operator and target -----
+#
+# Hakim's fourth adversarial re-hunt: the mandatory `[[:space:]]+` after
+# the operator was itself a bypass — bash accepts ZERO whitespace between
+# a redirect operator and its target. All five of these are real,
+# destructive truncating writes that were passing (exit 0) with no ticket.
+
+# 61. `>` with no space at all, no ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo hi>src/migrations/001.sql" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 no-space '>' (Hakim repro) blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 62. Same command, WITH an active ticket → ALLOWED.
+sb=$(make_sandbox)
+cat > "$sb/.claude/session/current-ticket" <<EOF
+repo=me2resh/apexyard
+number=886
+title=no-whitespace redirect operator test
+EOF
+in=$(jq -nc --arg c "echo hi>src/migrations/001.sql" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 no-space '>' allowed WITH ticket" 0 "" "$in" "$sb"
+
+# 63. `2>` (fd-numbered) with no space, no ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo a > /tmp/ok; echo b 2>src/migrations/001.sql" \
+      '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 no-space 'n>' fd-numbered blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 64. `>>` with no space, no ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo a > /tmp/ok; echo b>>src/migrations/001.sql" \
+      '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 no-space '>>' blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 65. `>|` (force-clobber) with no space, no ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo a > /tmp/ok; echo b>|src/migrations/001.sql" \
+      '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 no-space '>|' blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 66. `&>` (redirect-both-streams) with no space, no ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo a > /tmp/ok; echo b&>src/migrations/001.sql" \
+      '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 no-space '&>' blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# --- Sanity: no-space fd-dup / read forms must NOT be newly gated ------
+
+# 67. `echo err>&2` (fd-dup, NO space either) — no ticket, still ALLOWED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo err>&2" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 sanity: no-space '>&2' fd-dup is not gated" 0 "" "$in" "$sb"
+
+# 68. `make build 2>&1;true` (fd-dup, no space) — no ticket, still ALLOWED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "make build 2>&1;true" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 sanity: no-space '2>&1' fd-dup is not gated" 0 "" "$in" "$sb"
+
+# --- #886/#926 round 5: STRUCTURAL fix — |/||-adjacent redirects --------
+#
+# Hakim's fifth adversarial re-hunt found the actual root cause: DETECTION
+# (bash_command_appears_to_write) ran the redirection matcher on the
+# WHOLE, unsplit command, where a `|`-preceded `>` is excluded by the
+# leading-context class (needed for `2>&1`/`>&2`) and isn't at `^` either.
+# EXTRACTION already split first and found the target correctly —
+# detection and extraction disagreed. `;>` and `&&>` survived earlier
+# rounds by coincidence (`;` isn't excluded; `&&>` contains the substring
+# `&>`); `|`/`||` had no such rescue. These are real, truncating writes.
+
+# 69. `false ||> src/app.ts` (Hakim repro), no ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "false ||> src/app.ts" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 '||>' after false blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 70. Same command, WITH an active ticket → ALLOWED.
+sb=$(make_sandbox)
+cat > "$sb/.claude/session/current-ticket" <<EOF
+repo=me2resh/apexyard
+number=886
+title=pipe-adjacent redirect operator test
+EOF
+in=$(jq -nc --arg c "false ||> src/app.ts" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 '||>' after false allowed WITH ticket" 0 "" "$in" "$sb"
+
+# 71. `false ||>| src/app.ts` (force-clobber variant, Hakim repro), no
+#     ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "false ||>| src/app.ts" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 '||>|' force-clobber after false blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 72. `echo x |> src/app.ts` (single-pipe variant, Hakim repro), no ticket
+#     → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo x |> src/app.ts" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 '|>' after echo blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 73. The deletion-only bypass: `rm old.ts; false ||> src/app.ts` — a real
+#     write hiding behind a pipe-adjacent redirect alongside an rm. Must
+#     NOT be classified as deletion-only; no ticket → BLOCKED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "rm old.ts; false ||> src/app.ts" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 rm + '||>' hides a real write, blocked w/o ticket" 2 "BLOCKED" "$in" "$sb"
+
+# --- Sanity: pipe-adjacent fd-dup / reads must NOT be newly gated -------
+
+# 74. `echo x | cat 2>&1` — pipe THEN fd-dup, no in-repo write at all →
+#     still ALLOWED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "echo x | cat 2>&1" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 sanity: pipe then '2>&1' fd-dup is not gated" 0 "" "$in" "$sb"
+
+# 75. `false || echo err >&2` — or-chain THEN fd-dup, no in-repo write →
+#     still ALLOWED.
+sb=$(make_sandbox)
+in=$(jq -nc --arg c "false || echo err >&2" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#886 sanity: '||' then '>&2' fd-dup is not gated" 0 "" "$in" "$sb"
+
+# --- #1089 fail-closed degraded mode (closing #1087's LOW-2) -----------
+#
+# Mirror of cases 31/35 above (the out-of-governance exemption, #883), but
+# built with make_sandbox_no_pathresolve so _lib-path-resolve.sh is
+# missing. A target that is normally EXEMPT (rc=0, no ticket needed)
+# because it resolves to somewhere outside every governed tree must
+# instead be GATED (rc=2, BLOCKED) when the resolver is unavailable — an
+# unresolvable target must never be treated as exempt (#883). This is the
+# discriminating direction: a hypothetical regression that removed the
+# `[ -n "$_og_real_target" ]` guard around the exemption block (so the
+# block ran even on an empty resolve) would very likely flip this case's
+# result from BLOCKED to EXEMPT, since an empty string trivially fails
+# every "is this path inside X" prefix check the block relies on — proven
+# by hand against a scratch copy with that guard removed while developing
+# this test; the shipped hook (this file, unmodified) keeps the guard and
+# passes.
+
+# 76. Edit tool absolute write to a home-dotfile-style path OUTSIDE any
+#     git repo and OUTSIDE the ops fork, no ticket, LIB MISSING → BLOCKED
+#     (not exempt — contrast with case 31, which is the same scenario
+#     with the lib present and asserts rc=0).
+sb=$(make_sandbox_no_pathresolve)
+home_sim=$(mktemp -d)
+in=$(jq -nc --arg p "$home_sim/.zshrc" '{tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "#1089 fail-closed: out-of-repo dotfile GATED when lib missing" 2 "BLOCKED" "$in" "$sb"
+rm -rf "$home_sim"
+
+# 77. Same scenario, WITH an active ticket marker present → the ordinary
+#     ticket-gate path still passes (proves the degrade only removes the
+#     EXEMPTION, not the hook's ability to function once a ticket exists).
+sb=$(make_sandbox_no_pathresolve)
+home_sim=$(mktemp -d)
+cat > "$sb/.claude/session/current-ticket" <<EOF
+repo=me2resh/apexyard
+number=1089
+title=test
+url=https://example.com
+EOF
+in=$(jq -nc --arg p "$home_sim/.zshrc" '{tool_name:"Edit", tool_input:{file_path:$p}}')
+run_case "#1089 fail-closed: same target ALLOWED with an active ticket, lib still missing" 0 "" "$in" "$sb"
+rm -rf "$home_sim"
+
+# 78. Bash write to a plainly in-repo path, no ticket, LIB MISSING →
+#     BLOCKED (regression guard: the missing lib must not accidentally
+#     WIDEN the gate either — ordinary governed writes stay gated exactly
+#     as they would with the lib present).
+sb=$(make_sandbox_no_pathresolve)
+in=$(jq -nc --arg c "echo x > src/app.ts" '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#1089 fail-closed: in-repo write still BLOCKED when lib missing" 2 "BLOCKED" "$in" "$sb"
 
 # --- Summary -----------------------------------------------------------
 

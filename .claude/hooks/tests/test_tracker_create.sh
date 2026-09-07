@@ -175,6 +175,42 @@ else
   echo "SKIP: tracker_create glab per-project case (no yq / python3+PyYAML)"
 fi
 
+# Case 4b (#955) — glab prints the modern `/-/work_items/N` issue URL form.
+# _tracker_extract_ref_url must parse it (previously only matched /issues/N).
+if [ "$HAVE_YAML" = yes ]; then
+  SB2b=$(make_sandbox "version: 1
+projects:
+  - name: gl
+    repo: g/p
+    tracker:
+      kind: glab")
+  cat > "$SB2b/bin/glab" <<'EOF'
+#!/bin/bash
+if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+  echo "Creating issue in g/p..."
+  echo "https://gitlab.com/g/p/-/work_items/77"
+fi
+EOF
+  chmod +x "$SB2b/bin/glab"
+  printf 'glab body\n' > "$SB2b/body.md"
+  (
+    cd "$SB2b" || exit 1
+    # shellcheck source=/dev/null
+    . "$SB2b/.claude/hooks/_lib-tracker.sh"
+    tracker_clear_cache
+    out=$(PATH="$SB2b/bin:$PATH" tracker_create "g/p" "GL title" "$SB2b/body.md")
+    printf '%s\t%s\n' \
+      "$(printf '%s' "$out" | jq -r '.ref // empty' 2>/dev/null)" \
+      "$(printf '%s' "$out" | jq -r '.url // empty' 2>/dev/null)"
+  ) > "$SB2b/result"
+  IFS=$'\t' read -r r_ref r_url < "$SB2b/result"
+  assert_eq "tracker_create glab work_items → ref parsed"  "77" "$r_ref"
+  assert_eq "tracker_create glab work_items → url parsed"  "https://gitlab.com/g/p/-/work_items/77" "$r_url"
+  rm -rf "$SB2b"
+else
+  echo "SKIP: tracker_create glab work_items case (no yq / python3+PyYAML)"
+fi
+
 # Case 5 — per-project custom create_command. The title/body pass via ENV
 # ($TRACKER_TITLE / $TRACKER_BODY_FILE), never string-substituted — so a title
 # full of shell metacharacters cannot inject. (needs a YAML parser.)
@@ -212,6 +248,117 @@ EOF
   rm -rf "$SB3"
 else
   echo "SKIP: tracker_create custom per-project case (no yq / python3+PyYAML)"
+fi
+
+# ---------------------------------------------------------------------------
+# tracker_label_ensure (#709) — the tracker-agnostic analog of the inline
+# `gh label create` steps used by /spike, /prototype, /investigation.
+#
+# Contract: best-effort, ALWAYS exit 0. gh + glab do a real create; every other
+# kind (jira/linear/asana/custom/none) is a no-op. gh takes a BARE-hex colour
+# ("FBCA04"); glab normalises it to "#FBCA04".
+# ---------------------------------------------------------------------------
+
+# Case 6 — gh: `label create <name> --repo <repo>` with a BARE-hex colour.
+SBL=$(make_sandbox)
+cat > "$SBL/bin/gh" <<'EOF'
+#!/bin/bash
+[ -n "${GH_CAPTURE:-}" ] && printf '%s\n' "$@" > "$GH_CAPTURE"
+EOF
+chmod +x "$SBL/bin/gh"
+(
+  cd "$SBL" || exit 1
+  # shellcheck source=/dev/null
+  . "$SBL/.claude/hooks/_lib-tracker.sh"
+  tracker_clear_cache
+  PATH="$SBL/bin:$PATH" GH_CAPTURE="$SBL/cap" tracker_label_ensure "o/r" "spike" "FBCA04" "Throw-away exploration"
+  echo "rc=$?"
+) > "$SBL/rc"
+gh_cap="$SBL/cap"
+assert_eq "tracker_label_ensure gh → exit 0"                 "0"    "$(sed -n 's/^rc=//p' "$SBL/rc")"
+assert_eq "tracker_label_ensure gh → 'label create' subcmd"  "spike" "$(awk 'p{print;exit} /^create$/{p=1}' "$gh_cap")"
+assert_eq "tracker_label_ensure gh → --repo passed"          "o/r"  "$(awk 'p{print;exit} /^--repo$/{p=1}' "$gh_cap")"
+assert_eq "tracker_label_ensure gh → colour is BARE hex (no #)" "FBCA04" "$(awk 'p{print;exit} /^--color$/{p=1}' "$gh_cap")"
+
+# A gh that errors (e.g. duplicate label) must STILL leave tracker_label_ensure at exit 0.
+cat > "$SBL/bin/gh" <<'EOF'
+#!/bin/bash
+exit 22
+EOF
+chmod +x "$SBL/bin/gh"
+(
+  cd "$SBL" || exit 1
+  # shellcheck source=/dev/null
+  . "$SBL/.claude/hooks/_lib-tracker.sh"; tracker_clear_cache
+  PATH="$SBL/bin:$PATH" tracker_label_ensure "o/r" "spike" "FBCA04" "d"; echo "rc=$?"
+) > "$SBL/rc2"
+assert_eq "tracker_label_ensure gh error (dup) → still exit 0" "0" "$(sed -n 's/^rc=//p' "$SBL/rc2")"
+
+# Empty repo / name → no-op, exit 0, no CLI call.
+(
+  cd "$SBL" || exit 1
+  # shellcheck source=/dev/null
+  . "$SBL/.claude/hooks/_lib-tracker.sh"; tracker_clear_cache
+  tracker_label_ensure "" "spike"; echo "rc_norepo=$?"
+  tracker_label_ensure "o/r" "";     echo "rc_noname=$?"
+) > "$SBL/rc3"
+assert_eq "tracker_label_ensure empty repo → exit 0 (no-op)" "0" "$(sed -n 's/^rc_norepo=//p' "$SBL/rc3")"
+assert_eq "tracker_label_ensure empty name → exit 0 (no-op)" "0" "$(sed -n 's/^rc_noname=//p' "$SBL/rc3")"
+rm -rf "$SBL"
+
+# Case 7 — glab: `label create --name <name> -R <repo>` with a #-prefixed colour.
+if [ "$HAVE_YAML" = yes ]; then
+  SBLG=$(make_sandbox "version: 1
+projects:
+  - name: gl
+    repo: g/p
+    tracker:
+      kind: glab")
+  cat > "$SBLG/bin/glab" <<'EOF'
+#!/bin/bash
+[ -n "${GLAB_CAPTURE:-}" ] && printf '%s\n' "$@" > "$GLAB_CAPTURE"
+EOF
+  chmod +x "$SBLG/bin/glab"
+  (
+    cd "$SBLG" || exit 1
+    # shellcheck source=/dev/null
+    . "$SBLG/.claude/hooks/_lib-tracker.sh"; tracker_clear_cache
+    PATH="$SBLG/bin:$PATH" GLAB_CAPTURE="$SBLG/cap" tracker_label_ensure "g/p" "spike" "FBCA04" "d"; echo "rc=$?"
+  ) > "$SBLG/rc"
+  glab_cap="$SBLG/cap"
+  assert_eq "tracker_label_ensure glab → exit 0"                  "0"      "$(sed -n 's/^rc=//p' "$SBLG/rc")"
+  assert_eq "tracker_label_ensure glab → --name passed"           "spike"  "$(awk 'p{print;exit} /^--name$/{p=1}' "$glab_cap")"
+  assert_eq "tracker_label_ensure glab → -R (repo) passed"        "g/p"    "$(awk 'p{print;exit} /^-R$/{p=1}' "$glab_cap")"
+  assert_eq "tracker_label_ensure glab → colour normalised to #hex" "#FBCA04" "$(awk 'p{print;exit} /^--color$/{p=1}' "$glab_cap")"
+  rm -rf "$SBLG"
+
+  # Case 8 — a non-gh/glab tracker (jira) → no-op, exit 0, NO CLI on PATH is called.
+  SBLJ=$(make_sandbox "version: 1
+projects:
+  - name: jr
+    repo: j/r
+    tracker:
+      kind: jira")
+  # Put a booby-trapped gh/glab on PATH; a no-op must not invoke either.
+  for c in gh glab; do
+    cat > "$SBLJ/bin/$c" <<EOF
+#!/bin/bash
+touch "$SBLJ/CALLED_$c"
+EOF
+    chmod +x "$SBLJ/bin/$c"
+  done
+  (
+    cd "$SBLJ" || exit 1
+    # shellcheck source=/dev/null
+    . "$SBLJ/.claude/hooks/_lib-tracker.sh"; tracker_clear_cache
+    PATH="$SBLJ/bin:$PATH" tracker_label_ensure "j/r" "spike" "FBCA04" "d"; echo "rc=$?"
+  ) > "$SBLJ/rc"
+  called=no; { [ -e "$SBLJ/CALLED_gh" ] || [ -e "$SBLJ/CALLED_glab" ]; } && called=yes
+  assert_eq "tracker_label_ensure jira → exit 0 (no-op)"        "0"  "$(sed -n 's/^rc=//p' "$SBLJ/rc")"
+  assert_eq "tracker_label_ensure jira → no gh/glab invoked"    "no" "$called"
+  rm -rf "$SBLJ"
+else
+  echo "SKIP: tracker_label_ensure glab + jira per-project cases (no yq / python3+PyYAML)"
 fi
 
 echo "=========================================="
