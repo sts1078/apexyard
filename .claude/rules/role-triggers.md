@@ -26,6 +26,7 @@ ApexYard ships **20 role definitions** in `roles/{department}/`. They are not al
 | **Head of Data** | `roles/data/head-of-data.md` | Analytics strategy · data governance · reporting architecture · cross-project data modelling |
 | **Data Analyst** | `roles/data/data-analyst.md` | SQL queries · dashboards · A/B-test analysis · metric investigation |
 | **Data Engineer** | `roles/data/data-engineer.md` | ETL pipelines · data modelling · data-quality work · warehouse schema changes |
+| **Customer.io Specialist** (adopter agent — Miguel) | `.claude/agents/customerio-specialist.md` | **Any Customer.io question or task** · ESP / marketing-automation design, campaigns, journeys, transactional-send integration, consent sync, reporting webhooks · PR diff touches a managed project's Customer.io client code, its ESP event-emitter / notification-send modules, or its Customer.io-related docs (exact paths are project-specific — resolve via that project's own private knowledge layer, see the agent file) |
 
 ## Activation Protocol
 
@@ -95,6 +96,7 @@ This is a **prose convention**, not a mechanically-enforced format. The sibling 
 | User flow / wireframe / IA question | UX Designer |
 | Component spec / design tokens question | UI Designer |
 | Cross-project strategy question | The relevant Head of _ role |
+| Customer.io / ESP / marketing automation mentioned | Miguel (Customer.io Specialist) |
 
 **Prompted activation** — the user explicitly asks for a role:
 
@@ -186,6 +188,39 @@ Triggers from the table above that are **not** yet mechanically detected (e.g. "
 Tests live at `.claude/hooks/tests/test_detect_role_trigger.sh` and cover the three trigger families the acceptance criteria call out.
 
 ---
+
+### Adopter agents — fork-local, not upstream (Miguel, Customer.io Specialist)
+
+Miguel (`customerio-specialist`) is an **adopter agent**: it exists only in this fork,
+scoped to Customer.io integration work across whichever managed project(s) use it, and
+carries no canonical file under `roles/` — the same shape the retired Mautic
+specialist (Nabil) used before it. It is added to the Activation Table above (rather
+than kept in its own separate section like the utility agents below) because, unlike
+Naqid or Rex, it *does* own a routine SDLC trigger surface — any Customer.io question,
+or a diff touching a managed project's Customer.io integration code — not just an
+on-demand invocation. Miguel's **knowledge is split across two layers** — see the
+agent file for the full resolution mechanism: a generic, cross-project public layer at
+`.claude/memory/customerio/` in this fork, and a project-specific private layer
+resolved per-project via `portfolio_projects_dir`. Project account facts, ticket/AgDR
+references, and team member names live only in the private layer, never in this fork.
+
+**Class: isolated-work-class.** Per the same HYBRID model the rest of this file's
+triggers use (§ "Class-aware banner" below), Miguel should be **spawned via the `Agent`
+tool** with `subagent_type: customerio-specialist`, not adopted in-thread — the same
+reasoning as the other isolated-work-class roles (Tech Lead, QA Engineer, Security
+Auditor, …): the work benefits from isolated context and Miguel's own tool
+restrictions (`disallowedTools: Write, Edit` — it drafts, it doesn't land commits).
+Because Miguel has no `roles/` file, the mechanical banner's `**Class**:`-line lookup
+in `detect-role-trigger.sh` doesn't apply to it the way it does for department roles —
+this is a **prose-only** trigger for now (see "not yet mechanically detected" below);
+extending the hook to cover adopter agents is a later ticket, not part of this change.
+
+**Miguel hands off, it doesn't own the full SDLC chain.** It drafts implementation
+code and campaign specs, but build work lands through **Karim (Backend Engineer)** or
+**Yasmin (Frontend Engineer)** as appropriate, and design sign-off runs through
+**Hisham (Tech Lead)** authoring / **Tariq (Solution Architect)** reviewing — the
+normal Design → Build gates apply unchanged. Miguel is a specialist consultant in that
+chain, not a replacement for it.
 
 ### The Contrarian (utility agent — premise-level adversary)
 

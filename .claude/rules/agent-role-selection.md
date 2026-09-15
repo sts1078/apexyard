@@ -20,6 +20,7 @@ When spawning substantive build/coding/design work via the `Agent` tool, pick `s
 | User flows, information architecture, usability | `ux-designer` |
 | Code review of a diff | `code-reviewer` |
 | Security / OWASP / SAST review | `security-reviewer` |
+| Customer.io / ESP / marketing automation (campaigns, transactional sends, consent sync, webhooks, vendor questions) | `customerio-specialist` |
 | Genuine research or code search with no role home — "where is X defined", "how do libraries A/B/C compare" | `general-purpose` or `Explore` |
 
 The last row is the escape valve, not the default. `general-purpose` is for work that doesn't decompose into a role at all — open-ended investigation, multi-location search, a question with no single owning discipline. It is not a shortcut for "I don't want to look up which role fits."
