@@ -20,9 +20,10 @@ HOOK_SRC="$SRC_ROOT/.claude/hooks/require-active-ticket.sh"
 LIB_BASH="$SRC_ROOT/.claude/hooks/_lib-detect-bash-write.sh"
 LIB_CFG="$SRC_ROOT/.claude/hooks/_lib-read-config.sh"
 LIB_PATH_RESOLVE="$SRC_ROOT/.claude/hooks/_lib-path-resolve.sh"
+LIB_ACTIVE_TICKET="$SRC_ROOT/.claude/hooks/_lib-active-ticket.sh"
 DEFAULTS="$SRC_ROOT/.claude/project-config.defaults.json"
 
-for f in "$HOOK_SRC" "$LIB_BASH" "$LIB_CFG" "$LIB_PATH_RESOLVE" "$DEFAULTS"; do
+for f in "$HOOK_SRC" "$LIB_BASH" "$LIB_CFG" "$LIB_PATH_RESOLVE" "$LIB_ACTIVE_TICKET" "$DEFAULTS"; do
   if [ ! -f "$f" ]; then
     echo "FAIL: required source missing: $f" >&2
     exit 1
@@ -51,6 +52,7 @@ make_sandbox() {
   cp "$LIB_BASH" "$sb/.claude/hooks/_lib-detect-bash-write.sh"
   cp "$LIB_CFG"  "$sb/.claude/hooks/_lib-read-config.sh"
   cp "$LIB_PATH_RESOLVE" "$sb/.claude/hooks/_lib-path-resolve.sh"
+  cp "$LIB_ACTIVE_TICKET" "$sb/.claude/hooks/_lib-active-ticket.sh"
   cp "$DEFAULTS" "$sb/.claude/project-config.defaults.json"
   chmod +x "$sb/.claude/hooks/require-active-ticket.sh"
   echo "$sb"
@@ -79,6 +81,7 @@ make_sandbox_no_pathresolve() {
   cp "$HOOK_SRC" "$sb/.claude/hooks/require-active-ticket.sh"
   cp "$LIB_BASH" "$sb/.claude/hooks/_lib-detect-bash-write.sh"
   cp "$LIB_CFG"  "$sb/.claude/hooks/_lib-read-config.sh"
+  cp "$LIB_ACTIVE_TICKET" "$sb/.claude/hooks/_lib-active-ticket.sh"
   # NOTE: _lib-path-resolve.sh intentionally NOT copied here.
   cp "$DEFAULTS" "$sb/.claude/project-config.defaults.json"
   chmod +x "$sb/.claude/hooks/require-active-ticket.sh"
@@ -436,6 +439,7 @@ cp "$HOOK_SRC"  "$_t30_ops/.claude/hooks/require-active-ticket.sh"
 cp "$LIB_BASH"  "$_t30_ops/.claude/hooks/_lib-detect-bash-write.sh"
 cp "$LIB_CFG"   "$_t30_ops/.claude/hooks/_lib-read-config.sh"
 cp "$LIB_PATH_RESOLVE" "$_t30_ops/.claude/hooks/_lib-path-resolve.sh"
+cp "$LIB_ACTIVE_TICKET" "$_t30_ops/.claude/hooks/_lib-active-ticket.sh"
 cp "$DEFAULTS"  "$_t30_ops/.claude/project-config.defaults.json"
 [ -f "$LIB_OPS_SRC" ]  && cp "$LIB_OPS_SRC"  "$_t30_ops/.claude/hooks/_lib-ops-root.sh"
 [ -f "$LIB_PORT_SRC" ] && cp "$LIB_PORT_SRC" "$_t30_ops/.claude/hooks/_lib-portfolio-paths.sh"
@@ -968,6 +972,68 @@ rm -rf "$home_sim"
 sb=$(make_sandbox_no_pathresolve)
 in=$(jq -nc --arg c "echo x > src/app.ts" '{tool_name:"Bash", tool_input:{command:$c}}')
 run_case "#1089 fail-closed: in-repo write still BLOCKED when lib missing" 2 "BLOCKED" "$in" "$sb"
+
+# --- #1396: honor the active ticket for an unextractable Bash target ---
+#
+# active_ticket_marker_for_path used to return an empty marker as soon as
+# the target path could not be resolved (`[ -n "$resolved" ] || return 0`),
+# BEFORE it ever looked at current-ticket. The gate then blocked the write
+# even though a ticket was active. The fix: skip only the per-worktree and
+# per-project tiers when the target is unknown (there is no project to
+# resolve), and still check the ops-level current-ticket fallback.
+
+# 79. python3 -c with a COMPUTED path (no literal string) → unextractable
+#     target, but a current-ticket marker IS active → allowed (#1396 repro).
+sb=$(make_sandbox)
+cat > "$sb/.claude/session/current-ticket" <<EOF
+repo=me2resh/apexyard
+number=1396
+title=test
+url=https://example.com
+EOF
+in=$(jq -nc --arg c 'python3 -c "import pathlib; p = compute_path(); pathlib.Path(p).write_text(x)"' \
+  '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#1396 unextractable target honors active ticket" 0 "" "$in" "$sb"
+
+# 80. Same command, NO ticket at all → still BLOCKED (the fix must not
+#     turn into a blanket exemption for unextractable targets).
+sb=$(make_sandbox)
+in=$(jq -nc --arg c 'python3 -c "import pathlib; p = compute_path(); pathlib.Path(p).write_text(x)"' \
+  '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#1396 unextractable target still blocked w/o any ticket" 2 "BLOCKED" "$in" "$sb"
+
+# 81. Same command, a per-project marker exists for a DIFFERENT project but
+#     no current-ticket fallback → still BLOCKED (the per-project/per-
+#     worktree tiers are correctly skipped for an unknown target — they
+#     require a resolved project, which an unextractable target never has —
+#     and skipping them must not accidentally fall back to granting one of
+#     their markers).
+sb=$(make_sandbox)
+mkdir -p "$sb/.claude/session/tickets"
+cat > "$sb/.claude/session/tickets/myproj" <<EOF
+repo=me2resh/apexyard
+number=513
+title=unrelated project ticket
+EOF
+in=$(jq -nc --arg c 'python3 -c "import pathlib; p = compute_path(); pathlib.Path(p).write_text(x)"' \
+  '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#1396 unextractable target ignores an unrelated per-project marker" 2 "BLOCKED" "$in" "$sb"
+
+# 82. The #1396 issue's own reported repro: an in-place `sed -i` edit on a
+#     path held in a shell variable, not the python3 shape cases 79-81 use.
+#     bash_extract_write_targets does not extract a sed -i target at all, so
+#     this is the same unextractable-target class — a current-ticket marker
+#     IS active → allowed.
+sb=$(make_sandbox)
+cat > "$sb/.claude/session/current-ticket" <<EOF
+repo=me2resh/apexyard
+number=1396
+title=test
+url=https://example.com
+EOF
+in=$(jq -nc --arg c 'sed -i "s/x/y/" "$VAR"' \
+  '{tool_name:"Bash", tool_input:{command:$c}}')
+run_case "#1396 reported repro: sed -i on a variable path honors active ticket" 0 "" "$in" "$sb"
 
 # --- Summary -----------------------------------------------------------
 

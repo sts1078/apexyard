@@ -1,5 +1,5 @@
 #!/bin/bash
-# _lib-ops-root.sh — shared OPS_ROOT discovery for hooks and skills.
+# _lib-ops-root.sh — shared OPS_ROOT lookup for hooks and skills.
 #
 # An "ops root" is the directory containing one of:
 #
@@ -7,14 +7,10 @@
 #   2. BOTH `onboarding.yaml` AND `apexyard.projects.yaml` (legacy v1
 #      layout — pre-v2 single-fork OR pre-v2 split-portfolio adopters).
 #
-# Hooks that write or read framework session state (`.claude/session/*`)
-# need this to resolve consistently regardless of cwd. The failure mode
-# is real: when the operator works inside a managed-project workspace
-# clone at `workspace/<project>/`, `git rev-parse --show-toplevel`
-# returns the project clone, NOT the ops fork. Hooks that wrote markers
-# under the ops fork (e.g. via `require-active-ticket.sh`'s OPS_ROOT
-# walk) ended up invisible to merge-gate hooks that resolved REPO_ROOT
-# via plain `git rev-parse`.
+# Hooks that read or write `.claude/session/*` must resolve the same root from
+# every cwd. From `workspace/<project>/`, `git rev-parse --show-toplevel`
+# returns the managed project clone, not the ops fork. Without this lookup,
+# one hook can write a marker in the ops fork while another searches the clone.
 #
 # Why a marker file: split-portfolio v2 (#242) moves both `onboarding.yaml`
 # AND `apexyard.projects.yaml` to the private sibling repo. The legacy
@@ -44,8 +40,8 @@
 # `${APEXYARD_OPS_PIN_DIR:-$HOME/.claude/apexyard}/ops-root-<SESSION_ID>`.
 # `resolve_ops_root` consults the pin BEFORE walking up. Stale pins
 # self-heal because the pinned path is re-validated against the anchor
-# conditions; a pin pointing at a dir that no longer satisfies the
-# anchors is ignored and the walk-up runs.
+# conditions and framework hook directory; a pin pointing at a directory
+# that no longer satisfies either requirement is ignored and the walk-up runs.
 #
 # Escape hatches:
 #   - APEXYARD_OPS_DISABLE_PIN=1     → ignore the pin, use walk-up only
@@ -81,6 +77,33 @@
 [ -n "${_LIB_OPS_ROOT_SOURCED:-}" ] && return 0
 _LIB_OPS_ROOT_SOURCED=1
 
+# Return the main worktree for a path inside a Git worktree. Return the input
+# path when Git cannot provide a shared directory.
+_ops_root_main_worktree() {
+  local path="${1:-}" common git_dir main
+  [ -n "$path" ] || return 1
+  common=$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || {
+    printf '%s' "$path"
+    return 0
+  }
+
+  # A normal subdirectory of the main checkout shares the same Git directory
+  # as the common directory. Preserve that subdirectory. Only a linked
+  # worktree has a distinct worktree Git directory that should normalize to
+  # the main checkout.
+  git_dir=$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null) || {
+    printf '%s' "$path"
+    return 0
+  }
+  if [ "$git_dir" = "$common" ]; then
+    printf '%s' "$path"
+    return 0
+  fi
+
+  main=$(dirname "$common")
+  [ -d "$main" ] && printf '%s' "$main" || printf '%s' "$path"
+}
+
 # Pure walk-up. Recognises BOTH the v2 .apexyard-fork marker AND the
 # legacy v1 (onboarding.yaml + apexyard.projects.yaml) pair. Never
 # touches the pin.
@@ -107,6 +130,38 @@ resolve_ops_root_walk() {
   local canon
   canon=$(cd "$start" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || canon=""
   [ -n "$canon" ] && start="$canon"
+
+  # A linked worktree has a worktree-local .git file, but its common git
+  # directory belongs to the main checkout. Use that shared directory to
+  # normalize the starting point before looking for ops-root anchors.
+  start=$(_ops_root_main_worktree "$start")
+
+  # A caller can start one level above the fork when that enclosing directory
+  # is itself a Git repository. The upward walk cannot descend into the fork,
+  # so inspect immediate child directories for a single anchored fork before
+  # walking toward /. Do not guess when several children look like forks.
+  local child child_candidate="" child_matches=0
+  local v2_candidate="" v2_matches=0
+  for child in "$start"/*; do
+    [ -d "$child" ] || continue
+    if [ -f "$child/.apexyard-fork" ]; then
+      v2_matches=$((v2_matches + 1))
+      v2_candidate="$child"
+      child_matches=$((child_matches + 1))
+      child_candidate="$child"
+    elif [ -f "$child/onboarding.yaml" ] && [ -f "$child/apexyard.projects.yaml" ]; then
+      child_matches=$((child_matches + 1))
+      child_candidate="$child"
+    fi
+  done
+  if [ "$v2_matches" -eq 1 ]; then
+    printf '%s' "$v2_candidate"
+    return 0
+  fi
+  if [ "$child_matches" -eq 1 ]; then
+    printf '%s' "$child_candidate"
+    return 0
+  fi
 
   local r="$start"
   while [ -n "$r" ] && [ "$r" != "/" ]; do
@@ -141,6 +196,17 @@ _ops_root_anchor_valid() {
     return 0
   fi
   return 1
+}
+
+# A session pin must identify the actual ops fork, not a split-portfolio
+# data repository that happens to carry the legacy v1 anchor pair. The
+# framework hooks live under .claude/hooks; requiring that directory here
+# keeps a valid-looking portfolio sibling from becoming the trusted pin.
+_ops_root_pin_valid() {
+  local r="$1"
+  _ops_root_anchor_valid "$r" || return 1
+  [ -d "$r/.claude/hooks" ] || return 1
+  return 0
 }
 
 # ------------------------------------------------------------------------
@@ -232,8 +298,10 @@ resolve_ops_root() {
       # literal. The single read is the whole file; we ignore any
       # subsequent lines (defensive against future format expansion).
       IFS= read -r pinned < "$pin_file" || pinned=""
-      if [ -n "$pinned" ] && _ops_root_anchor_valid "$pinned"; then
-        printf '%s' "$pinned"
+      local normalized_pin
+      normalized_pin=$(_ops_root_main_worktree "$pinned")
+      if [ -n "$normalized_pin" ] && _ops_root_pin_valid "$normalized_pin"; then
+        printf '%s' "$normalized_pin"
         return 0
       fi
       # Pin present but stale (path no longer satisfies anchors).

@@ -1,3 +1,295 @@
+## [v5.7.0] — 2026-09-27
+
+Minor release — 2 features, 9 fixes, 1 improvement.
+
+Behaviour change: `/approve-merge` now stops a merge when the PR is behind its base branch (#1406). The check is on by default. Set `merge.require_up_to_date` to `false` in `.claude/project-config.json` to turn it off.
+
+### Added (feat)
+
+- (#1420) make reviews faster with a severity bar, delta re-reviews and CI-first testing — 020fbab
+- (#1351) add opt-in ORBIT planning adapter — 6d8f24b
+
+### Fixed (fix)
+
+- (#1419) block a merge when a merge gate cannot load a library — cdb57f1
+- (#1406) stop a merge when the PR is behind its base, and make /release-sync keep main-only changes — c16860e
+- (#1404) honor the active ticket for unparsed write targets, and document a reviewer test path — 9d46ee2
+- (#1400) scope the active-reviewer marker per session and stop owner-name leak false blocks — 5c12554
+- (#1397) cover .astro in the design gate, exempt Alembic env.py, and warn when config overrides drop defaults — d60a0d4
+- (#1399) validate Mermaid in every diagram-producing skill and align the DFD template with threat-model — 5be9ecb
+- (#1355) stop Claude Code always-loading rule bodies — 6870a8b
+- (#1373) skip CodeQL analysis outside the upstream repository — c66d7c5
+- (#1353) pass Orbit record root to validation — 7e561ec
+
+### Changed (refactor / chore / docs)
+
+- (#1398) load the writing rule in every agent, add a no-search-MCP fallback, and make Rex verify acceptance criteria — 2b6ed42
+
+### Closes
+
+- Closes #1350
+- Closes #1354
+- Closes #1370
+- Closes #1376
+- Closes #1385
+- Closes #1386
+- Closes #1390
+- Closes #1396
+
+## [v5.6.3] — 2026-09-18
+
+Patch release — 15 fixes, 7 improvements.
+
+v5.6.2 had no Released-From trailer. `/release-sync` for that tag landed at the tip of `dev`, so the default changelog range was empty (#872). This section lists first-parent commits after `08e694b` that were not in v5.6.0–v5.6.2.
+
+### Fixed (fix)
+
+- (#1344) rank git -C commit path above payload cwd — 0c5cf1c
+- (#1339) run merge gates on wrapped merge helper — b768d22
+- (#1337) keep adapter hook tests green without yq — cd26bbc
+- (#1334) pass tracker CLI stderr through remaining adapters — 45506d3
+- (#1316) harden split-portfolio adapter trust — 8b7c02b
+- (#1329) surface tracker CLI errors from tracker_create — 8e0e60a
+- (#1326) restore /update chain across v5.6.0–v5.6.2 — 8883d61
+- (#1314) anchor split-portfolio adapter resolution — 9da26a4
+- (#1310) make AgDR identifiers unique — cca0198
+- (#1309) batch markdownlint pre-push paths on Windows — e9c95e0
+- (#1308) preserve update sync ancestry — df688bc
+- (#1307) classify delegated gate scripts as trust-chain — 160a5c7
+- (#1306) reject hookless split-portfolio session pins — 4f7af44
+- (#1305) prefer v2 fork anchor in nested child scan — bf43d48
+- (#1295) continue after adapter prerequisite drift — 3e4c234
+
+### Changed (refactor / chore / docs)
+
+- (#1333) add ahmedashraffcih to the code contributors row — 3250e2e
+- (#1331) lock SessionStart dispatcher lists and failure paths — d1eea7c
+- (#1330) validate Rex review body before the marker write — c217498
+- (#1324) load rule bodies on demand — 51055e5
+- (#1321) collapse SessionStart hook fan-out — 3953d50
+- (#1320) dispatch Bash PreToolUse hooks once — fdbe2f2
+- (#1312) native-first Cursor overlay — 8e12865
+
+### Closes
+
+- Closes #1294
+- Closes #1298
+- Closes #1301
+- Closes #1304
+- Closes #1311
+- Closes #1313
+- Closes #1315
+- Closes #1317
+- Closes #1318
+- Closes #1319
+- Closes #1322
+- Closes #1323
+- Closes #1338
+
+## [v5.6.2] — 2026-09-14
+
+Patch release — 1 fix.
+
+### Fixed (fix)
+
+- (#1292) handle repo-less adapter registry entries — 08e694b
+
+### Closes
+
+- Closes #1292
+
+## [v5.6.1] — 2026-09-14
+
+Minor release — 2 features, 1 improvement.
+
+### Added (feat)
+
+- (#1289) make harness adapters framework defaults — e466542
+- (#1288) install and audit portfolio harness adapters — bd78903
+
+### Changed (refactor / chore / docs)
+
+- (#1287) record portfolio harness adapter decision — d5ad998
+
+### Closes
+
+- Closes #1286
+
+## [v5.6.0] — 2026-09-14
+
+Minor release — 1 feature, 1 improvement.
+
+### Added (feat)
+
+- (#1288) install and audit portfolio harness adapters — bd78903
+
+### Changed (refactor / chore / docs)
+
+- (#1287) record portfolio harness adapter decision — d5ad998
+
+### Closes
+
+- Closes #1286
+
+## [v5.5.2] — 2026-09-13
+
+Patch release — 6 fixes, 2 improvements.
+
+### Fixed (fix)
+
+- (#1281) support large PR file lists in merge gates — 4965d40
+- (#1277) require explicit tracker repo across projects — 831e9fa
+- (#1279) restore structured Rex review reports — dc3883a
+- (#1276) find nested ops fork under enclosing repo — 6b98e58
+- (#1275) allow orchestrator review worktree setup — 2cdf62f
+- (#1274) resolve review scanner from ops pin — d665f73
+
+### Changed (refactor / chore / docs)
+
+- (#1282) isolate search config fixtures — d5e88cb
+- sync dev after v5.5.1 release — 98a4f58
+
+### Closes
+
+- Closes #1261
+- Closes #1268
+- Closes #1270
+- Closes #1271
+- Closes #1272
+
+## [v5.5.1] — 2026-09-11
+
+Patch release — 1 improvement.
+
+### Changed (refactor / chore / docs)
+
+- (#1260) credit issue contributors across repository history — 3c50de0
+
+### Closes
+
+- Closes #1259
+
+## [v5.5.0] — 2026-09-10
+
+Minor release — 8 features, 48 fixes, 21 improvements.
+
+### Added (feat)
+
+- (#1239) split issue and review tracker hosts — 1796a60
+- enforce controlled technical writing for new artifacts — f468a0e
+- (#1191) require browser evidence in QA and design-review records — 5408ddd
+- (#1179) add build-time handbook discovery — 012d586
+- (#1170) add cross-harness quality regression — ba05168
+- (#1168) add writing standard with Strict and Flavored modes — 97e8479
+- (#1167) extend right-size tiers to planning, implementation, and artifacts — 11e7e14
+- (#1166) add universal evidence-grounding contract — 5327d74
+
+### Fixed (fix)
+
+- (#1257) block agent privilege escalation — 8be2866
+- (#1255) ground reviewer behavior claims in real usage — afb20eb
+- recognize security approval safeguards — 205a967
+- avoid false quality-regression failures — ff08420
+- recognize likely and unconfirmed findings — e34fb5a
+- recognize qualified uncertainty in regression checks — 6e52f45
+- classify harness startup failures as not run — 0881cf8
+- (#1248) make regression fixtures actionable — 8b441dc
+- (#1238) keep review agents read-only — 8a1ec98
+- (#1234) prevent doubled leading slash in path resolver — 951715f
+- (#1232) scope protected-branch backstop to target repo — 0c3e610
+- (#1227) accept v-prefixed changelog headings — fcfccc5
+- (#1224) require browser evidence for Head of Design — 98b378d
+- (#1223) keep release PR variables in one shell block — aa96a5a
+- (#1222) restore fixture heading — 10ba602
+- (#1221) require Rex to verify cited criteria — b5bf397
+- (#1220) scan staged private references — 16450aa
+- (#1219) block heredoc compound commands — 31317de
+- complete AgDR renumbering audit — 6605342
+- reserve AgDR identifiers across branches — ccfad7a
+- coordinate AgDR allocation across worktrees — 453a98c
+- guard AgDR identifier allocation — 57d9796
+- normalize pinned worktree roots — 98cc377
+- normalize linked worktree ops roots — 648a5c7
+- report skipped suites as failures — 9a65a41
+- fail when hook suites skip cases — 15e6414
+- surface skipped hook tests — 943b430
+- fail closed on unresolved PR base — db1c1a2
+- document wrapper scan limits — 9c54059
+- block compound shell substitutions — ba12f90
+- reject nested commit commands — 51e3701
+- cover the wrapper shapes and fix two review-attribution bugs — 2e8b787
+- reject newline compound commit commands — e3cc705
+- reject compound commit commands — 98bc8ef
+- parse first commit message argument — b9b52f3
+- scan gh pr review and gh pr merge for leaked private references — 2d72f33
+- (#1198) compose _resolve_real_path after lexical collapse in migration gate — 7359a5d
+- (#1192) preserve Released-From trailer on release-PR squash — 4bbacfd
+- (#1190) correct same-account review verdict guidance — a300c98
+- (#1180) refuse unresolvable migration write targets instead of falling back — 65a304b
+- (#1156) preserve workspace README in split setup — 62b65f7
+- (#1155) resolve merge repo before cd heuristic — a4878dd
+- (#1173) make the merge gate satisfiable through the sanctioned path — da0ce0a
+- (#1177) close command validation parse bypasses — 0bd7ee5
+- (#1176) fail closed on unreadable hook payloads — 47ca52a
+- (#1172) right-size handbook review triggers — 2efcf30
+- (#1157) detect review markers written to a gate-invisible path — 89209c9
+- (#1154) scope Wave 1 skills to tracked files — 6a0f5f1
+
+### Changed (refactor / chore / docs)
+
+- (#1247) clarify quality and adapter guides — fabef4a
+- (#1246) clarify hook comments — 7c14a3d
+- (#1245) clarify portfolio operations — bc1b0e8
+- (#1244) clarify release and harness guides — af69862
+- (#1243) clarify single-fork setup — 4eac600
+- (#1242) clarify onboarding language — 0e3a11c
+- (#1241) clarify workflow guides — ec197aa
+- (#1240) clarify framework prose — ace2247
+- (#1237) close multi-repo design residuals — b300ed6
+- (#1236) dismiss stale forge approvals — aa5b9a6
+- (#1235) describe jq config merge semantics accurately — fa46f8d
+- (#1231) share active-ticket marker resolver — 56aacc0
+- resolve adapter dependency advisories — f86c050
+- update AgDR inbound reference — 1b885f0
+- cover write detector false positives — ed3f45e
+- audit portfolio root worktree behavior — 81e7f43
+- quarantine documented environment skips — 471f575
+- Merge remote-tracking branch 'upstream/dev' into fix/GH-1206-leak-protection-gaps — 6fe94d2
+- (#1205) technical design for portfolio multi-repo aggregation — 6dc663a
+- (#1175) apply writing standard across artefacts — 1171f75
+- (#1148) point live site references to apexyard.ai — 173c07c
+
+### Closes
+
+- Closes #1136
+- Closes #1138
+- Closes #1146
+- Closes #1147
+- Closes #1148
+- Closes #1151
+- Closes #1152
+- Closes #1159
+- Closes #1161
+- Closes #1163
+- Closes #1164
+- Closes #1165
+- Closes #1171
+- Closes #1174
+- Closes #1181
+- Closes #1182
+- Closes #1187
+- Closes #1196
+- Closes #1197
+- Closes #1202
+- Closes #1207
+- Closes #1209
+- Closes #1218
+- Closes #1225
+- Closes #1230
+- Closes #1233
+- Closes #1255
+- Closes #1257
+
 # Changelog
 
 All notable changes to ApexYard are documented here.
