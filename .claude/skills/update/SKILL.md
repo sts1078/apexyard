@@ -18,6 +18,9 @@ allowed-tools: Bash, Read, Write, Edit
 
 # /update — Sync ApexYard Fork from Upstream
 
+Read `.claude/rules/writing-standard.md`. Use the **controlled technical writing profile** for the sync
+PR body and migration notes. Lead with the outcome and next action.
+
 Single-command replacement for the manual "fetch → branch → merge → push → PR" dance that fork maintainers do to pull upstream apexyard changes into their ops fork.
 
 ## Path resolution
@@ -353,6 +356,12 @@ fi
 git checkout -b "$BRANCH"
 ```
 
+Sync PRs created by `/update` must preserve upstream ancestry. Merge the PR
+with a true merge commit (`--merge`), through `/approve-merge` or the
+equivalent host command. Do not squash or rebase an update sync PR. The merge
+skill detects the `chore/(#<TICKET>-)?sync-upstream-*` branch convention and
+selects the ancestry-preserving strategy automatically.
+
 ### 6. Do the sync
 
 `$UPSTREAM_REF` was set in the pre-step (`upstream/main` by default, `upstream/dev` under `--from-dev`).
@@ -610,12 +619,13 @@ Idempotence: empty `workspace/` (no entries to move) is a no-op.
 ```bash
 NEEDS=()
 grep -qxF onboarding.yaml .gitignore 2>/dev/null || NEEDS+=(onboarding.yaml)
-grep -qxF workspace .gitignore 2>/dev/null || NEEDS+=(workspace)
+grep -qxF 'workspace/*' .gitignore 2>/dev/null || NEEDS+=('workspace/*')
+grep -qxF '!workspace/README.md' .gitignore 2>/dev/null || NEEDS+=('!workspace/README.md')
 
 if [ "${#NEEDS[@]}" -gt 0 ]; then
   {
     echo ""
-    echo "# Split-portfolio v2 (framework ≥ #242): onboarding + workspace live in the private sibling repo."
+    echo "# Split-portfolio v2 (framework ≥ #242): onboarding + workspace entries live in the private sibling repo."
     for n in "${NEEDS[@]}"; do echo "$n"; done
   } >> .gitignore
   git add .gitignore
@@ -1093,3 +1103,17 @@ Always remove the bootstrap marker on a clean exit (after the sync branch is rea
 ---
 
 *Part of [ApexYard](https://github.com/me2resh/apexyard) — multi-project SDLC framework for Claude Code · MIT.*
+
+### Portfolio harness adapter reconciliation
+
+After framework files and migrations are complete, reconcile declared adapters
+for registered projects. This is explicit and registry-driven; projects with
+no `adapters` field are left unchanged.
+
+```bash
+bash bin/manage-portfolio-adapters.sh --install
+```
+
+For a read-only governance report, use `--check`. A missing workspace,
+unsupported adapter, or stale generated adapter exits non-zero and is reported
+as structured drift.

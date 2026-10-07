@@ -1,6 +1,9 @@
 # Project Config
 
-`.claude/project-config.defaults.json` ships the framework defaults. Each fork optionally creates `.claude/project-config.json` to override specific top-level keys. Both files live inside `.claude/`, so edits are exempt from the ticket-first hook (per `.claude/rules/workflow-gates.md`).
+`.claude/project-config.defaults.json` contains the framework defaults. A fork
+can create `.claude/project-config.json` to override selected keys. Both files
+live in `.claude/`, so the ticket-first hook does not block these edits. See
+`.claude/rules/workflow-gates.md` for the exemption.
 
 Related: apexyard#109 introduced this scheme; apexyard#107, #111, #112, #113, #114, #115 all read from it.
 
@@ -14,9 +17,14 @@ Related: apexyard#109 introduced this scheme; apexyard#107, #111, #112, #113, #1
 
 ### Why the real file is untracked (apexyard#1031)
 
-This mirrors the `onboarding.example.yaml` / `onboarding.yaml` pair: the example is tracked so upstream can improve it, and the real file stays purely local.
+This follows the `onboarding.example.yaml` and `onboarding.yaml` pattern. The
+example is tracked so upstream can improve it. The real file stays local.
 
-Until #1031 the framework tracked `project-config.json` *and* listed it in `.gitignore`. Git ignores `.gitignore` for already-tracked files, so the entry was inert for every adopter — and the consequence was worse than the drift it appeared to be. Because the file was tracked, a plain `git checkout <branch>` wrote the indexed version over the working copy. For a split-portfolio adopter that silently destroyed the `portfolio` block, which is load-bearing (path resolution is config-only; there is no convention-based sibling discovery). The destroyed content had never been in git — correctly, it is private — so there was nothing to restore from.
+Before #1031, the framework tracked `project-config.json` and listed it in
+`.gitignore`. Git does not ignore a file that is already tracked. A checkout
+could therefore overwrite a fork's local configuration. For a split portfolio,
+that could remove the `portfolio` block and break path resolution. The private
+content was not in git, so the file could not be restored from history.
 
 **If you have an existing fork that committed this file**, run `git rm --cached .claude/project-config.json` once. It leaves the file on disk and lets the ignore entry finally apply. Back the file up first if it holds a `portfolio` block: it is not recoverable from git.
 
@@ -44,7 +52,28 @@ The defaults file would be the obvious home, and it is the wrong one. `_lib-read
 
 ## Merge semantics
 
-**Shallow** at the top level. If the override file defines `"ticket": {...}`, that entire subtree replaces the default `ticket` subtree. To extend rather than replace, copy the default fields and add new ones. This keeps the merge behaviour predictable without requiring deep-merge semantics in shell scripts.
+Objects merge recursively. Override values win scalar conflicts. Arrays replace
+the inherited array as a whole. An override containing only
+`"portfolio": {"registry": "custom"}` keeps other object members such as
+`portfolio.stale_days`. An override of `ticket.bootstrap_skills` replaces that
+array. The shared config reader gets this behavior from `jq -s '.[0] * .[1]'`.
+
+**A warning names the entries that an array override drops (#1369).**
+An override array that omits entries the matching default array carries
+merges exactly as documented above. The override still wins, unchanged.
+`_lib-read-config.sh` also prints one advisory `WARN:` line to stderr. The
+line names the key and every dropped entry, the first time that override is
+read in a session. Without a session ID, the cross-process cache has no key
+to read or write, so the warning prints again in every new process. This
+never blocks and never changes the merged value. It only makes an
+otherwise-silent drop visible. It applies only to a key that has a default
+array in `.claude/project-config.defaults.json`.
+`migration_paths`, `migration_label`, `ui_paths`, `ui_paths_exclude`,
+`design_paths`, `design_paths_exclude`, and `architecture_paths` have no
+entry in `.claude/project-config.defaults.json` at all — their hook holds
+the built-in default in code, not JSON. A drop against one of those produces
+no warning today. See AgDR-0167 for why, and #1401 for the follow-up that
+tracks closing this gap for those seven keys.
 
 ## Schema (v1)
 

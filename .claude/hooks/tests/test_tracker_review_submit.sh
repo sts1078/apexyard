@@ -14,7 +14,7 @@
 #   1. gh happy path → correct `gh pr review` verb + --body-file
 #   2. gh verdict verbs → approve / request-changes map to the right flag
 #   3. gh verdict normalisation → an unknown verdict falls back to --comment
-#   4. gh failure → the CLI's non-zero exit propagates
+#   4. gh failure → the CLI's non-zero exit and stderr diagnostic propagate
 #   5. kind=none → returns 3, echoes the body (shape-only, not a CLI error)
 #   6. per-project glab override → mr approve / mr note create dispatch [needs YAML]
 #   7. per-project custom review_command → env-passed body, injection-safe [needs YAML]
@@ -29,6 +29,7 @@ TRACKER_LIB="$HOOK_DIR/_lib-tracker.sh"
 CONFIG_LIB="$HOOK_DIR/_lib-read-config.sh"
 PORTFOLIO_LIB="$HOOK_DIR/_lib-portfolio-paths.sh"
 OPSROOT_LIB="$HOOK_DIR/_lib-ops-root.sh"
+RUNTIME_SCANNER="$HOOK_DIR/check-private-refs-runtime.sh"
 
 PASS=0
 FAIL=0
@@ -49,6 +50,8 @@ make_sandbox() {
   cp "$TRACKER_LIB"   "$sb/.claude/hooks/_lib-tracker.sh"
   cp "$CONFIG_LIB"    "$sb/.claude/hooks/_lib-read-config.sh"
   cp "$PORTFOLIO_LIB" "$sb/.claude/hooks/_lib-portfolio-paths.sh"
+  cp "$RUNTIME_SCANNER" "$sb/.claude/hooks/check-private-refs-runtime.sh"
+  chmod +x "$sb/.claude/hooks/check-private-refs-runtime.sh"
   [ -f "$OPSROOT_LIB" ] && cp "$OPSROOT_LIB" "$sb/.claude/hooks/_lib-ops-root.sh"
   cat > "$sb/.claude/project-config.defaults.json" <<'JSON'
 { "tracker": { "kind": "gh" } }
@@ -105,15 +108,19 @@ PATH="$SB/bin:$PATH" GH_CAPTURE="$SB/c3" tracker_review_submit "o/r" 42 'bogus; 
 assert_eq "gh unknown verdict → normalised to --comment"      "1" "$(grep -c -- '--comment' "$SB/c3")"
 assert_eq "gh unknown verdict → no stray --approve"           "0" "$(grep -c -- '--approve' "$SB/c3")"
 
-# Case 4 — the CLI's non-zero exit propagates (2>/dev/null must not mask it).
+# Case 4 — the CLI's non-zero exit and diagnostic both propagate. The caller
+# needs this message to distinguish a self-review refusal from auth or repo
+# failures without reproducing the command by hand.
 cat > "$SB/bin/gh" <<'EOF'
 #!/bin/bash
+echo 'mock gh review rejection' >&2
 exit 1
 EOF
 chmod +x "$SB/bin/gh"
 tracker_clear_cache
-PATH="$SB/bin:$PATH" tracker_review_submit "o/r" 42 comment "$BODY"; rc=$?
+err=$(PATH="$SB/bin:$PATH" tracker_review_submit "o/r" 42 comment "$BODY" 2>&1 >/dev/null); rc=$?
 assert_eq "gh failure → non-zero exit propagates" "1" "$rc"
+assert_eq "gh failure → stderr diagnostic propagates" "mock gh review rejection" "$err"
 
 # Case 4b — a non-numeric PR id is rejected before any dispatch/eval (matches the
 # documented "{pr} is numeric" contract; defense-in-depth for the custom eval).
@@ -147,6 +154,39 @@ assert_eq "kind=none (with body) → echoes body for manual filing" "REVIEW BODY
 assert_eq "kind=none (no body) → exit 3" "3" "$nb_rc"
 assert_eq "kind=none (no body) → empty stdout" "" "$nb_out"
 rm -rf "$SBN"
+
+# #1332 — glab and custom review adapters pass CLI stderr through. Set kind via
+# project-config defaults so this runs without a YAML parser.
+SBE=$(make_sandbox)
+BODYE="$SBE/rev.md"; printf 'body\n' > "$BODYE"
+cat > "$SBE/bin/glab" <<'EOF'
+#!/bin/bash
+echo "glab: 403 Forbidden" >&2
+exit 1
+EOF
+chmod +x "$SBE/bin/glab"
+for kind in glab custom; do
+  if [ "$kind" = "glab" ]; then
+    printf '{ "tracker": { "kind": "glab" } }\n' > "$SBE/.claude/project-config.defaults.json"
+    expect="glab: 403 Forbidden"
+  else
+    printf '%s\n' '{ "tracker": { "kind": "custom", "review_command": "echo \"custom: review rejected\" >&2; false" } }' > "$SBE/.claude/project-config.defaults.json"
+    expect="custom: review rejected"
+  fi
+  (
+    cd "$SBE" || exit 1
+    # shellcheck source=/dev/null
+    . "$SBE/.claude/hooks/_lib-tracker.sh"
+    tracker_clear_cache
+    out=$(PATH="$SBE/bin:$PATH" tracker_review_submit "o/r" 7 comment "$BODYE" 2>"$SBE/err-$kind"); rc=$?
+    printf '%s|%s\n' "$rc" "$out"
+  ) > "$SBE/r-$kind"
+  IFS="|" read -r e_rc e_out < "$SBE/r-$kind"
+  assert_eq "tracker_review_submit $kind failure → non-zero exit"           "1" "$e_rc"
+  assert_eq "tracker_review_submit $kind failure → empty stdout"            "" "$e_out"
+  assert_eq "tracker_review_submit $kind failure → CLI error reaches stderr" "1" "$(grep -c "$expect" "$SBE/err-$kind")"
+done
+rm -rf "$SBE"
 
 # Case 6 — per-project glab override dispatches glab (needs a YAML parser).
 # The glab mock APPENDS each invocation (space-joined) so approve+note (two

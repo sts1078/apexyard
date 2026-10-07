@@ -30,6 +30,15 @@
 #       Returns the absolute path to the reviews directory:
 #       <marker_home>/.claude/session/reviews
 #
+#   review_validate_rex_body <body_file>
+#       Exit 0 when the Rex review body has the required Output Format
+#       headings. Exit 1 otherwise. Does not write a marker.
+#
+#   review_write_rex_approved <body_file> <sha> <marker_path>
+#       Validate the body, require a **APPROVED** verdict line and a
+#       matching Reviewed commit footer SHA, then write the bare SHA
+#       plus newline. See AgDR-0161 / me2resh/apexyard#1322.
+#
 # USAGE (in a hook or skill)
 # --------------------------
 #   . "$(dirname "$0")/_lib-review-markers.sh"
@@ -89,6 +98,62 @@ review_marker_path() {
   printf '%s/%s__%s-%s.approved' "$reviews_dir" "$safe_repo" "$pr" "$role"
 }
 
+# ---------------------------------------------------------------------------
+# ACTIVE-REVIEWER MARKER PATH — session-scoped (me2resh/apexyard#1376)
+# ---------------------------------------------------------------------------
+#
+# Before this fix, .claude/session/active-reviewer was ONE fixed path shared
+# by every Claude Code session and worktree on the same ops fork. A review
+# running in session B set that one file, and block-reviewer-repo-mutation.sh
+# read it from EVERY session — so session A's unrelated `git commit` was
+# blocked by a review it had no part in. Two concurrent reviews (different
+# sessions) also overwrote each other's marker, and the first to finish
+# deleted the file out from under the other's still-running review.
+#
+# active_reviewer_marker_path scopes the marker filename to the session that
+# wrote it, so a review in one session can be read only by hooks running in
+# that SAME session — never granting, and never blocking, mutations in any
+# other session.
+#
+# active_reviewer_marker_path [marker_home] [session_id]
+#
+# Args:
+#   marker_home — the ops-fork root (or "." when unresolved). Defaults to ".".
+#   session_id  — defaults to $CLAUDE_CODE_SESSION_ID. When both this arg and
+#                 the env var are empty, the function falls back to the
+#                 pre-#1376 FIXED path (no session suffix). This is the safe
+#                 fallback for callers that legitimately have no Claude Code
+#                 session at all — a standalone git-native hook, CI, or a
+#                 bare test-harness invocation. This function makes no claim
+#                 about how many such processes act on a given ops fork at
+#                 once; the fixed path is exactly as safe (or unsafe) as it
+#                 was before this function existed, and every caller that
+#                 never set the env var (the pre-#1376 test suite included)
+#                 keeps working unchanged.
+#
+# Output (stdout): the absolute marker path.
+active_reviewer_marker_path() {
+  local marker_home="${1:-.}"
+  local sid="${2:-${CLAUDE_CODE_SESSION_ID:-}}"
+  local base="${marker_home}/.claude/session/active-reviewer"
+
+  if [ -z "$sid" ]; then
+    printf '%s' "$base"
+    return 0
+  fi
+
+  # Sanitise: a session id is expected to already be a safe token (the
+  # harness's own id), but never trust it as a bare path component. Collapse
+  # anything outside [A-Za-z0-9._-] to '_' so the result can never contain a
+  # '/' (or other separator) and escape the .claude/session/ directory this
+  # marker lives in (NOT the .claude/session/reviews/ directory — the
+  # active-reviewer marker and the *.approved review markers are siblings,
+  # not the same directory).
+  local safe_sid
+  safe_sid=$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_')
+  printf '%s.%s' "$base" "$safe_sid"
+}
+
 # pr_base_repo <pr> <repo>
 #
 # Echoes the PR/MR's BASE (host) repo as "owner/repo" — the repo the PR *lives
@@ -138,9 +203,8 @@ review_marker_path() {
 # `gh pr view` exposes no baseRepository field, but the PR URL is ALWAYS rooted
 # on the base repo — parse owner/repo from it (handles GitHub /pull/ and GitLab
 # /-/merge_requests/, including nested GitLab groups). Falls back to the passed
-# <repo> when the URL can't be parsed or the scoped gh call fails — so SAME-REPO
-# PRs (base == head) resolve exactly as before and this change is a provable
-# no-op for them.
+# <repo> when the URL cannot be parsed or the scoped gh call fails. Returning
+# the caller's repo would create a marker that the merge gate cannot read.
 #
 # Args:
 #   pr    — the PR/MR number.
@@ -148,11 +212,9 @@ review_marker_path() {
 #           this PR. Used to SCOPE the gh query (`--repo`), never omitted in
 #           favour of gh's ambient default.
 #
-# Output (stdout): "owner/repo" derived from the resolved PR URL, or the
-# passed-in <repo> when the scoped query fails/is unparseable (fail-soft — the
-# caller's own repo is still the best available answer).
-# Exit code: 0 normally; 1 (with a stderr message, no stdout) when <pr> is
-# given but <repo> is missing — there is nothing safe to scope the query to.
+# Output (stdout): "owner/repo" derived from the resolved PR URL.
+# Exit code: 0 on a parsed PR URL; 1 with no stdout when the query fails, the
+# URL is unparseable, or <repo> is missing.
 pr_base_repo() {
   local pr="${1:-}" repo="${2:-}" url base
   if [ -z "$pr" ]; then
@@ -165,11 +227,229 @@ pr_base_repo() {
   fi
   # ALWAYS scoped to the caller-supplied repo — never an unscoped/ambient gh
   # call. See the WHY-A-REQUIRED-REPO note above.
-  url=$(gh pr view "$pr" --repo "$repo" --json url,baseRefName --jq '.url' 2>/dev/null)
+  url=$(gh pr view "$pr" --repo "$repo" --json url,baseRefName --jq '.url' 2>/dev/null) || {
+    echo "_lib-review-markers.sh: cannot resolve PR #$pr in base repo $repo; no review marker written" >&2
+    return 1
+  }
   base=$(printf '%s' "$url" | sed -E 's#^https?://[^/]+/(.+)/(pull|-/merge_requests)/[0-9].*#\1#')
   if [ -n "$base" ] && [ "$base" != "$url" ]; then
     printf '%s' "$base"
   else
-    printf '%s' "$repo"
+    echo "_lib-review-markers.sh: cannot parse base repo from PR #$pr URL; no review marker written" >&2
+    return 1
   fi
+}
+
+# ---------------------------------------------------------------------------
+# GATE-INVISIBLE (bare-number) MARKER DETECTION — me2resh/apexyard#1144
+# ---------------------------------------------------------------------------
+
+# review_role_skill <role>
+#
+# Maps a marker role to the skill that legitimately produces it, so refusal
+# messages can name the right re-run command instead of a generic one.
+review_role_skill() {
+  case "${1:-}" in
+    rex)          printf '/code-review' ;;
+    security)     printf '/security-review' ;;
+    architecture) printf '/design-review' ;;
+    design)       printf '/approve-design' ;;
+    ceo)          printf '/approve-merge' ;;
+    *)            printf '/code-review' ;;
+  esac
+}
+
+# unqualified_marker_path <marker_home> <pr> <role>
+#
+# Echoes the BARE-NUMBER sibling of `review_marker_path`'s output:
+#
+#   <marker_home>/.claude/session/reviews/<pr>-<role>.approved
+#
+# This is the pre-AgDR-0060 filename shape, and it is the shape an agent
+# produces when a spawn prompt hands it a literal marker path instead of
+# letting it resolve one through `review_marker_path` (me2resh/apexyard#1144).
+#
+# NOTHING READS THIS PATH. Every merge gate — block-unreviewed-merge.sh,
+# require-architecture-review.sh, require-design-review-for-ui.sh — resolves
+# the marker it looks for through `review_marker_path`, which always emits the
+# repo-qualified form. There is no bare-number fallback on any on-disk marker
+# lookup. (block-unreviewed-merge.sh does match a bare-number basename when
+# scanning the *command text* of a compound write-then-merge command, but that
+# is inline-content validation for the CEO marker, not an on-disk read — it
+# does not make a bare-number file on disk visible to the gate.)
+#
+# So a file at this path is GATE-INVISIBLE while looking, to a human running
+# `ls .claude/session/reviews/`, exactly like a valid approval. This helper
+# exists so gates and skills can NAME that near-miss in their refusal message
+# rather than reporting a bare "marker missing".
+#
+# Output (stdout): the bare-number marker path.
+# Exit code: 0 on success; 1 if required args are missing (with stderr msg).
+unqualified_marker_path() {
+  local marker_home="${1:-${MARKER_HOME:-.}}"
+  local pr="${2:-}"
+  local role="${3:-}"
+
+  if [ -z "$pr" ] || [ -z "$role" ]; then
+    echo "_lib-review-markers.sh: unqualified_marker_path requires <marker_home> <pr> <role>" >&2
+    return 1
+  fi
+
+  local reviews_dir
+  reviews_dir=$(review_markers_dir "$marker_home")
+
+  printf '%s/%s-%s.approved' "$reviews_dir" "$pr" "$role"
+}
+
+# unqualified_marker_hint <marker_home> <pr> <role> <expected_path>
+#
+# Echoes a ready-to-print diagnostic paragraph when a gate-invisible
+# bare-number sibling EXISTS on disk for this (pr, role); echoes nothing and
+# returns 1 otherwise. Callers append the output to their own refusal message:
+#
+#   if HINT=$(unqualified_marker_hint "$MARKER_HOME" "$PR" rex "$REX_APPROVAL"); then
+#     printf '%s\n' "$HINT" >&2
+#   fi
+#
+# WHY THE "DO NOT MOVE IT" LINE IS THE LOAD-BEARING PART
+# -----------------------------------------------------
+# The obvious repair for a near-miss marker — renaming it to the qualified
+# path — is exactly the marker-forging behaviour `.claude/rules/pr-workflow.md`
+# § "Build agents cannot self-review" exists to prevent. An agent that has
+# blocked itself on a path mistake, and believes the review genuinely passed,
+# is one rationalisation away from hand-writing a gate signal for a review
+# this session cannot vouch for. Naming the near-miss without also naming the
+# wrong fix would hand that agent a diagnosis and a temptation in the same
+# breath. See me2resh/apexyard#1144.
+unqualified_marker_hint() {
+  local marker_home="${1:-${MARKER_HOME:-.}}"
+  local pr="${2:-}"
+  local role="${3:-}"
+  local expected="${4:-}"
+  local near_miss skill
+
+  near_miss=$(unqualified_marker_path "$marker_home" "$pr" "$role") || return 1
+  [ -f "$near_miss" ] || return 1
+  skill=$(review_role_skill "$role")
+
+  cat <<HINT
+
+NEAR MISS — a gate-invisible marker for this PR exists on disk:
+
+  found:    ${near_miss}
+  expected: ${expected}
+
+That file is named in the pre-AgDR-0060 bare-number form. No gate reads it,
+which is why this PR reads as unreviewed even though a marker is sitting in
+.claude/session/reviews/. It is what you get when a reviewer is handed a
+literal marker path in its spawn prompt instead of resolving one through
+review_marker_path (me2resh/apexyard#1144).
+
+Do NOT rename, move, or copy it into place. Nothing mechanically stops you,
+and that is the point: the qualified path is a gate signal, and relocating a
+file to satisfy a gate records a review this session cannot vouch for — the
+exact behaviour .claude/rules/pr-workflow.md forbids.
+
+Delete it and re-run the real review, passing NO marker path:
+
+  rm ${near_miss}
+  ${skill} ${pr}
+HINT
+}
+
+# Required Rex Output Format headings (me2resh/apexyard#1322, AgDR-0161).
+# Matched as start-of-line prefixes so `## Code Review: PR #N` still counts.
+_REVIEW_REX_BODY_HEADINGS='## Code Review
+### Summary
+### Checklist Results
+### Issues Found
+### Validation
+### Verdict'
+
+# review_validate_rex_body <body_file>
+#
+# Exit 0 when the file is non-empty and contains every required heading
+# plus a Reviewed commit footer. Exit 1 with a stderr reason otherwise.
+# Does not inspect the host review. Does not write a marker.
+review_validate_rex_body() {
+  local body_file="${1:-}"
+  if [ -z "$body_file" ] || [ ! -f "$body_file" ]; then
+    echo "review_validate_rex_body: body file missing" >&2
+    return 1
+  fi
+  if [ ! -s "$body_file" ]; then
+    echo "review_validate_rex_body: body is empty" >&2
+    return 1
+  fi
+
+  local heading
+  while IFS= read -r heading; do
+    [ -z "$heading" ] && continue
+    # Headings are literal prefixes. They contain no regex metacharacters.
+    if ! grep -qE "^${heading}" "$body_file"; then
+      echo "review_validate_rex_body: missing heading: ${heading}" >&2
+      return 1
+    fi
+  done <<EOF
+${_REVIEW_REX_BODY_HEADINGS}
+EOF
+
+  if ! grep -q 'Reviewed commit' "$body_file"; then
+    echo "review_validate_rex_body: missing Reviewed commit footer" >&2
+    return 1
+  fi
+  return 0
+}
+
+# _review_rex_verdict_block <body_file>
+# Print lines after ### Verdict until the next ### heading, a --- rule, or EOF.
+_review_rex_verdict_block() {
+  awk '
+    /^### Verdict([[:space:]]|$)/ { p=1; next }
+    p && /^### / { exit }
+    p && /^---[[:space:]]*$/ { exit }
+    p { print }
+  ' "$1"
+}
+
+# review_write_rex_approved <body_file> <sha> <marker_path>
+#
+# Validate the local body. Refuse a verdict that is not **APPROVED**.
+# Refuse a footer SHA that does not match. Then write the bare 40-char
+# SHA plus newline. The merge gate still reads only that SHA.
+review_write_rex_approved() {
+  local body_file="${1:-}"
+  local sha="${2:-}"
+  local marker_path="${3:-}"
+
+  if [ -z "$body_file" ] || [ -z "$sha" ] || [ -z "$marker_path" ]; then
+    echo "review_write_rex_approved: need <body_file> <sha> <marker_path>" >&2
+    return 1
+  fi
+  if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$'; then
+    echo "review_write_rex_approved: sha must be 40 lowercase hex chars" >&2
+    return 1
+  fi
+
+  review_validate_rex_body "$body_file" || return 1
+
+  if ! grep -F "Reviewed commit" "$body_file" | grep -Fq "$sha"; then
+    echo "review_write_rex_approved: Reviewed commit footer does not match sha" >&2
+    return 1
+  fi
+
+  local verdict
+  verdict=$(_review_rex_verdict_block "$body_file")
+  if echo "$verdict" | grep -q 'CHANGES REQUESTED'; then
+    echo "review_write_rex_approved: CHANGES REQUESTED must not write a marker" >&2
+    return 1
+  fi
+  # Exact bold token only. A substring match would accept "NOT APPROVED".
+  if ! echo "$verdict" | grep -qE '^\*\*APPROVED\*\*[[:space:]]*$'; then
+    echo "review_write_rex_approved: verdict is not **APPROVED**" >&2
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$marker_path")"
+  printf '%s\n' "$sha" > "$marker_path"
 }

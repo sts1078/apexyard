@@ -1,8 +1,8 @@
 # apexyard release process
 
-apexyard uses a **release-cut** branch model (sometimes called gitflow-lite) for the framework repo. This doc is the prose runbook for cutting a release. The `/release` skill at `.claude/skills/release/SKILL.md` automates most of the steps; this doc is the manual fallback and the conceptual reference.
+ApexYard uses a **release-cut** branch model for the framework repository. This document explains the release steps and the checks behind them. The `/release` skill at `.claude/skills/release/SKILL.md` automates most of the work; this page is the manual fallback and the reference for how the process fits together.
 
-**Important — framework only.** This release model is for `me2resh/apexyard` itself, not for managed projects under apexyard governance. Managed projects stay trunk-based (PRs merge to `main`); only the framework has dev/main + tags. See `docs/multi-project.md` for the rationale.
+**Framework only.** This model applies to `me2resh/apexyard`, not to managed projects. Managed projects remain trunk-based and merge PRs to `main`; only the framework uses `dev`, `main`, and release tags. See `docs/multi-project.md` for the reason.
 
 Decision records: [`docs/agdr/AgDR-0007-release-cut-branch-model.md`](agdr/AgDR-0007-release-cut-branch-model.md) · [`docs/agdr/AgDR-0076-release-automation.md`](agdr/AgDR-0076-release-automation.md).
 
@@ -24,13 +24,15 @@ main ─────●────────────────●──
 
 ## When to cut a release
 
-Curated cadence — release when there's a meaningful batch on `dev` that's worth surfacing to adopters. Loose guidance:
+Use judgment. Cut a release when `dev` contains a meaningful batch that adopters should receive. These are guidelines:
 
 - **Patch (`vX.Y.Z+1`)** — bug fixes only. Cut whenever there are ≥ 1 fix and adopters would benefit.
 - **Minor (`vX.Y+1.0`)** — new features (additive). Cut every 1–2 weeks if there's been net-new feature work.
 - **Major (`vX+1.0.0`)** — breaking changes. Coordinate with adopters first; release notes call out migrations.
 
-If `dev` is N commits ahead and nothing's broken, you're free to NOT release — adopters will stay on the previous tag and the drift banner will tell them about the new tag when it's cut.
+Before cutting a release, run and review the cross-harness regression: `bin/quality-regression.sh --harness all` (see `docs/quality-regression/README.md`). A high-severity failure on any supported harness that ran stops the release until it is fixed. Record the result in `docs/quality-regression/runs/<date>/README.md`.
+
+If `dev` is ahead and nothing is broken, you can wait. Adopters stay on the previous tag, and the drift banner tells them about the new tag after release.
 
 ## Cutting a release — happy path (automated)
 
@@ -59,7 +61,7 @@ After the PR merges, the `auto-tag-on-release-pr-merge.yml` CI workflow fires an
 - Runs the ancestry guard (`git merge-base --is-ancestor <sha> main`)
 - Creates a GitHub Release entry from the CHANGELOG section in the PR body (in the same job — a tag pushed via GITHUB_TOKEN does not trigger a secondary release workflow)
 
-Then run `/release-sync vX.Y.Z` to sync main→dev and prevent squash-divergence accumulation.
+Then run `/release-sync vX.Y.Z` to sync main→dev and prevent squash-divergence accumulation. The skill merges main into dev with a plain merge, not a blind `-X ours`. It stops and asks on every conflict, including one caused only by the release squash commit — see `.claude/skills/release-sync/SKILL.md` § "Merge main with a plain merge" and AgDR-0170.
 
 ## Cutting a release — manual steps (fallback)
 
@@ -233,6 +235,7 @@ For maintainers of `me2resh/apexyard`, configure GitHub branch protection on `ma
 
 - Require pull request before merging
 - Require approvals: 1
+- Dismiss stale approvals when new commits are pushed
 - Require status checks to pass before merging (markdownlint, lychee, shellcheck, Verify Ticket ID)
 - Restrict who can push to matching branches (only repo admins, for the rare manual tag-fix case)
 
@@ -242,6 +245,7 @@ Branch protection on `dev` matches the prior `main` setup — required reviews +
 
 - `AgDR-0007` — the original release-cut branch model decision record
 - `AgDR-0076` — the release-automation design record
+- `AgDR-0170` — the decision to replace `-X ours` with a plain merge that stops and asks on every conflict in `/release-sync`, and to add a behind-base check to `/approve-merge`
 - `.claude/skills/release/SKILL.md` — the automated flow (this doc is the manual fallback)
 - `bin/release-changelog.sh` — the changelog generation helper
 - `.github/workflows/auto-tag-on-release-pr-merge.yml` — the auto-tag CI workflow

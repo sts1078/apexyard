@@ -8,6 +8,10 @@ effort: high
 
 # /threat-model — STRIDE Threat Modelling
 
+Read `.claude/rules/writing-standard.md`. Use the **controlled technical writing profile** for the
+threat model and its findings: lead with the outcome, preserve uncertainty, and
+remove empty sections.
+
 Deep-dive security analysis using the STRIDE framework. Produces a prioritized threat catalogue with mitigations. This is the expert companion to `/launch-check`'s security row — invoke it when security shows WARN or FAIL, or proactively before any launch.
 
 **Consumes the DFD produced by [`/dfd`](../dfd/SKILL.md).** The Data Flow Diagram at `projects/<project>/architecture/dfd.md` is the source of truth; this skill iterates its trust-boundary crossings rather than rebuilding its own data-flow view. If the DFD doesn't exist, this skill OFFERS to run `/dfd` first (see Step 1). See AgDR-0026 for the single-source-of-truth rationale.
@@ -407,7 +411,7 @@ The lib re-evaluates the marker on every persist; the operator can toggle freely
 
 - **Don't link to the live DFD.** Inline copy at audit time. The whole point of the snapshot is that the threat model survives later DFD edits without rotting.
 - **Don't fall back to "inline discovery" when the DFD is missing.** That was the pre-#270 behaviour; it produced low-quality artefacts that couldn't be re-validated later. Refuse instead.
-- **Don't extract from `dfd.md` programmatically beyond the three sections named in Step 1b.** The contract is: Mermaid block + trust boundaries + classifications. Adding more (e.g. provenance) bloats the artefact; adding less breaks the audit's self-containment.
+- **Don't extract from `dfd.md` programmatically beyond the three sections named in Step 1b.** The contract is the three exact headings `## Diagram` (Mermaid block), `## Trust boundaries` (table), and `## Data classifications` (table) — both `templates/architecture/dfd.md` and `.claude/skills/dfd/generate-mermaid.sh` MUST emit these verbatim (see the heading-contract rule in `.claude/skills/dfd/SKILL.md`). Adding more (e.g. provenance) bloats the artefact; adding less, or renaming a heading, breaks the audit's self-containment and silently zeroes out the matching `dfd_*` variable in Step 1b.
 - **Don't skip the Mermaid lint after persistence.** If the live DFD has broken Mermaid, the snapshot inherits it. Surfacing that here is cheaper than discovering it on GitHub.
 
 ---

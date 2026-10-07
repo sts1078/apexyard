@@ -56,6 +56,14 @@ projects:
     repo: acme/zebrafish-app
     workspace: workspace/zebrafish
     status: active
+  - name: widget-forge
+    repo: test-org/widget-forge
+    workspace: workspace/widget-forge
+    status: active
+  - name: me2resh
+    repo: owner-collision/me2resh-tool
+    workspace: workspace/me2resh-tool
+    status: active
 YAML
 
 # A directory to cd into so the hook walks up to find the registry.
@@ -811,6 +819,341 @@ run_case "#1070: --input on a non-public target → still a no-op" \
 run_case "#1070: existing -f/-F short forms are unaffected" \
   2 "project name: curios-dog" \
   "gh api repos/me2resh/apexyard/issues -f title=bug -f body='discovered during curios-dog rebuild'"
+
+# ---------------------------------------------------------------------------
+# 47-59. me2resh/apexyard#1206 — gh pr review and gh pr merge were entirely
+# unmatched shapes. Neither the step-1 shape detection nor find_write_segment's
+# anchor recognised them, and settings.json wired no PreToolUse entry to this
+# hook for either — so the hook never ran at all, not merely failed to scan.
+# Discovered live during the #1205 review: a reviewer quoted a private
+# identifier through `gh pr review` and nothing caught it.
+# ---------------------------------------------------------------------------
+
+# These cases use the fictional `widget-forge` fixture (added to the
+# registry above), not the file's other fixture names. Rex found that the
+# file's other fixture names are real registered projects, already public
+# on `dev` many times over. Adding more real names to the PR that fixes
+# leak protection is not a defensible trade. widget-forge is verified
+# absent from the real portfolio registry.
+
+# 47. gh pr review — leak in the inline --body.
+run_case "#1206: gh pr review leak in --body → blocked" \
+  2 "project name: widget-forge" \
+  "gh pr review 12 --repo me2resh/apexyard --comment --body 'confirmed during widget-forge rebuild'"
+
+# 48. gh pr review — leak read from --body-file, the shape
+#     tracker_review_submit actually emits for Rex/Hakim/Tariq.
+REVIEW_LEAK_FILE="$TMPDIR/review-leak.md"
+printf 'Verdict: APPROVED. Confirmed clean after the widget-forge rebuild.\n' > "$REVIEW_LEAK_FILE"
+run_case "#1206: gh pr review leak in --body-file → blocked" \
+  2 "project name: widget-forge" \
+  "gh pr review 12 --repo me2resh/apexyard --approve --body-file \"$REVIEW_LEAK_FILE\""
+
+# 49. Clean review body → passes (no new false positive on the added shape).
+run_case "#1206: gh pr review clean body → pass" \
+  0 "" \
+  "gh pr review 12 --repo me2resh/apexyard --request-changes --body 'please add a test for the edge case'"
+
+# 50. Non-public target stays a no-op, same as every other shape.
+run_case "#1206: gh pr review on non-public target → no-op" \
+  0 "" \
+  "gh pr review 12 --repo test-org/widget-forge --comment --body 'mentions widget-forge freely'"
+
+# 51. Skip marker still bypasses on the new shape.
+run_case "#1206: gh pr review skip marker bypasses" \
+  0 "private-refs: allow marker present" \
+  "gh pr review 12 --repo me2resh/apexyard --comment --body 'widget-forge <!-- private-refs: allow -->'"
+
+# 52. Named explicitly in the issue's own constraints: a reviewer quoting the
+#     LITERAL PHRASE "gh pr review" in prose (e.g. telling the author what to
+#     run next) must not itself trigger a block absent a real private
+#     reference. The command below is the pre-existing `gh issue comment`
+#     shape; "gh pr review" only ever appears inside its --body text.
+run_case "#1206: prose mentioning 'gh pr review' is not itself a leak" \
+  0 "" \
+  "gh issue comment 5 --repo me2resh/apexyard --body 'looks good — run gh pr review 12 next'"
+
+# 53. gh pr merge — leak in the long-form --subject. This is the actual gap:
+#     -t already rode in on the pre-existing --title|-t pattern (case 54
+#     below), but the long form did not match anything before this fix.
+run_case "#1206: gh pr merge leak in --subject → blocked" \
+  2 "project name: widget-forge" \
+  "gh pr merge 12 --repo me2resh/apexyard --squash --subject 'Merge: widget-forge rebuild notes'"
+
+# 54. Regression guard — the short flag -t was ALREADY an accidental alias of
+#     --title|-t before this fix (gh pr merge documents -t as --subject's own
+#     short form). Confirms the pre-existing coverage still works alongside
+#     the newly-added --subject long form, not just after it.
+run_case "#1206: gh pr merge leak via -t (pre-existing alias) → blocked" \
+  2 "project name: widget-forge" \
+  "gh pr merge 12 --repo me2resh/apexyard --squash -t 'widget-forge rebuild notes'"
+
+# 55. gh pr merge — leak in the inline --body (merge-commit body text).
+run_case "#1206: gh pr merge leak in --body → blocked" \
+  2 "project name: widget-forge" \
+  "gh pr merge 12 --repo me2resh/apexyard --squash --body 'closes the loop from the widget-forge rebuild'"
+
+# 56. gh pr merge — leak read from --body-file, tracker_pr_merge's own shape
+#     (AgDR-0132 / #1136's reviewed-subject/body feature).
+MERGE_LEAK_FILE="$TMPDIR/merge-leak.md"
+printf 'Reviewed subject/body for the widget-forge rebuild.\n' > "$MERGE_LEAK_FILE"
+run_case "#1206: gh pr merge leak in --body-file → blocked" \
+  2 "project name: widget-forge" \
+  "gh pr merge 12 --repo me2resh/apexyard --squash --body-file \"$MERGE_LEAK_FILE\""
+
+# 57. The ordinary /approve-merge shape — no --subject/--body override at all
+#     — must stay a no-op. AgDR-0132 made both optional and empty by default,
+#     so this is the COMMON case and must not become a new false positive on
+#     every routine merge.
+run_case "#1206: gh pr merge with no subject/body override → no-op" \
+  0 "" \
+  "gh pr merge 12 --repo me2resh/apexyard --squash --delete-branch"
+
+# 58. Clean subject and body → passes.
+run_case "#1206: gh pr merge clean subject/body → pass" \
+  0 "" \
+  "gh pr merge 12 --repo me2resh/apexyard --squash --subject 'Merge: docs typo fix' --body 'fixes a typo in the README'"
+
+# 59. Folding --subject into the shared TITLE pattern (rather than giving it
+#     a parallel extractor) buys the #1068 truncation-safety net for free —
+#     this proves it actually applies: a chained command after a quoted
+#     --subject must refuse rather than silently scan a truncated value, the
+#     same class case 21 pins for --title. Message names --title/--subject
+#     only (not --body), matching the Hakim-refinement below.
+run_case "#1206: chained command after quoted --subject → truncation refusal, not a silent leak" \
+  2 "could not safely determine where a --title or --subject value ends" \
+  "gh pr merge 12 --repo me2resh/apexyard --squash --subject \"widget-forge rebuild\" && gh pr list --repo other-org/other-repo"
+
+# ---------------------------------------------------------------------------
+# 60-71. me2resh/apexyard#1206 H2 (Hakim HIGH, blocking) — the wrapper shapes.
+#
+# code-reviewer.md prescribes tracker_review_submit for every review Rex,
+# Hakim, and Tariq post — "NOT a hardcoded gh pr review". approve-merge's
+# SKILL.md states its command text "never literally contains gh pr merge".
+# The gh call happens inside a sourced shell function, so no second
+# PreToolUse event fires for it. This hook had zero matchers for either
+# wrapper before this fix, and none for tracker_create either — the gap 1
+# fix above closed the shape nobody actually calls; these cases close the
+# shape the framework's own agents call on every review and every reviewed
+# merge.
+# ---------------------------------------------------------------------------
+
+# 60. tracker_review_submit — leak in the body-file (its only content arg).
+WRAPPER_REVIEW_FILE="$TMPDIR/wrapper-review.md"
+printf 'Verdict: APPROVED. Clean after the widget-forge rebuild.\n' > "$WRAPPER_REVIEW_FILE"
+run_case "#1206 H2: tracker_review_submit wrapper leak in body-file → blocked" \
+  2 "project name: widget-forge" \
+  "tracker_review_submit \"me2resh/apexyard\" \"12\" \"comment\" \"$WRAPPER_REVIEW_FILE\""
+
+# 61. tracker_review_submit — clean body-file → passes.
+WRAPPER_REVIEW_CLEAN="$TMPDIR/wrapper-review-clean.md"
+printf 'Verdict: APPROVED. No concerns.\n' > "$WRAPPER_REVIEW_CLEAN"
+run_case "#1206 H2: tracker_review_submit wrapper clean body-file → pass" \
+  0 "" \
+  "tracker_review_submit \"me2resh/apexyard\" \"12\" \"comment\" \"$WRAPPER_REVIEW_CLEAN\""
+
+# 62. tracker_review_submit — non-public target (private repo, arg 1) → no-op.
+run_case "#1206 H2: tracker_review_submit wrapper on non-public target → no-op" \
+  0 "" \
+  "tracker_review_submit \"test-org/widget-forge\" \"12\" \"comment\" \"$WRAPPER_REVIEW_FILE\""
+
+# 63. tracker_review_submit — no body-file at all (approve with no comment,
+#     a real /code-review shape) → no-op, not a false positive.
+run_case "#1206 H2: tracker_review_submit wrapper with no body-file → no-op" \
+  0 "" \
+  "tracker_review_submit \"me2resh/apexyard\" \"12\" \"approve\""
+
+# 64. tracker_pr_merge — leak in the subject (positional argument 5).
+run_case "#1206 H2: tracker_pr_merge wrapper leak in subject (arg 5) → blocked" \
+  2 "project name: widget-forge" \
+  "tracker_pr_merge \"me2resh/apexyard\" \"12\" \"squash\" true \"Merge: widget-forge rebuild notes\""
+
+# 65. tracker_pr_merge — leak in the body-file (positional argument 6).
+WRAPPER_MERGE_FILE="$TMPDIR/wrapper-merge.md"
+printf 'Reviewed subject/body for the widget-forge rebuild.\n' > "$WRAPPER_MERGE_FILE"
+run_case "#1206 H2: tracker_pr_merge wrapper leak in body-file (arg 6) → blocked" \
+  2 "project name: widget-forge" \
+  "tracker_pr_merge \"me2resh/apexyard\" \"12\" \"squash\" true \"Clean subject\" \"$WRAPPER_MERGE_FILE\""
+
+# 66. tracker_pr_merge — the ordinary /approve-merge shape, no subject/body
+#     at all (AgDR-0132 makes both optional). Must stay a no-op — this is
+#     the common case on EVERY merge, not an edge case.
+run_case "#1206 H2: tracker_pr_merge wrapper with no subject/body → no-op" \
+  0 "" \
+  "tracker_pr_merge \"me2resh/apexyard\" \"12\" \"squash\" true"
+
+# 67. tracker_pr_merge — non-public target (private repo, arg 1) → no-op.
+run_case "#1206 H2: tracker_pr_merge wrapper on non-public target → no-op" \
+  0 "" \
+  "tracker_pr_merge \"test-org/widget-forge\" \"12\" \"squash\" true \"widget-forge rebuild\""
+
+# 68. tracker_create — leak in the title (positional argument 2).
+run_case "#1206 H2: tracker_create wrapper leak in title (arg 2) → blocked" \
+  2 "project name: widget-forge" \
+  "tracker_create \"me2resh/apexyard\" \"Bug found during widget-forge rebuild\""
+
+# 69. tracker_create — leak in the body-file (positional argument 3).
+WRAPPER_CREATE_FILE="$TMPDIR/wrapper-create.md"
+printf 'Discovered during the widget-forge rebuild.\n' > "$WRAPPER_CREATE_FILE"
+run_case "#1206 H2: tracker_create wrapper leak in body-file (arg 3) → blocked" \
+  2 "project name: widget-forge" \
+  "tracker_create \"me2resh/apexyard\" \"A clean title\" \"$WRAPPER_CREATE_FILE\""
+
+# 70. tracker_create — non-public target (private repo, arg 1) → no-op.
+run_case "#1206 H2: tracker_create wrapper on non-public target → no-op" \
+  0 "" \
+  "tracker_create \"test-org/widget-forge\" \"Mentions widget-forge freely\""
+
+# 71. The realistic call shape: wrapped in command substitution, matching
+#     /approve-merge's own documented invocation
+#     (MERGE_RESULT=$(tracker_pr_merge "..." ...)) — proves the anchor
+#     correctly reaches into a $(...) wrapper the same way it already does
+#     for the gh shapes (case 33's out=$(gh ...) proof).
+run_case "#1206 H2: tracker_pr_merge wrapper inside \$(...) still anchors and scans" \
+  2 "project name: widget-forge" \
+  "MERGE_RESULT=\$(tracker_pr_merge \"me2resh/apexyard\" \"12\" \"squash\" true \"widget-forge leak\")"
+
+# ---------------------------------------------------------------------------
+# 72-77b. me2resh/apexyard#1387 — a registered project's `name` colliding with
+# the OWNER login of the public repo being written to (not just its bare
+# repo name) was treated as a leak. The fixture registry above adds a
+# project literally named "me2resh" (owner-collision/me2resh-tool) to
+# reproduce it: before the fix, writing the target repo out in full as
+# "me2resh/apexyard", or plainly @-mentioning its owner, blocked on
+# "project name: me2resh" even though nothing private was referenced.
+#
+# The fix exempts the target repo's OWNER login (step 8 in the source file),
+# but only inside the two safe forms the issue asked to unblock: `@owner` and
+# `owner/<repo-slug>`. A BARE, standalone mention of the owner's name (case
+# 77b) still blocks, exactly like any other registered private project's
+# name — the issue asked to keep the block in that case, and a genuinely
+# different private project must still block exactly as before too.
+# ---------------------------------------------------------------------------
+
+# 72. The exact repro: writing the target out as "<owner>/<repo>" in body
+#     prose used to block on the coincidental "me2resh" project-name match.
+run_case "#1387: writing the target repo as <owner>/<repo> in the body must not block" \
+  0 "" \
+  "gh issue create --repo me2resh/apexyard --title 'fix: patch' --body 'filed against me2resh/apexyard directly'"
+
+# 73. Plainly @-mentioning the owner (no slash, no repo name at all) — the
+#     issue's own repro notes a review "could not @-mention its author".
+run_case "#1387: @-mentioning the repo owner in the body must not block" \
+  0 "" \
+  "gh pr review 12 --repo me2resh/apexyard --comment --body 'nice catch @me2resh, one nit below'"
+
+# 74. Owner mention in the title, not just the body.
+run_case "#1387: owner mention in the title must not block" \
+  0 "" \
+  "gh issue create --repo me2resh/apexyard --title 'me2resh/apexyard: fix release notes' --body 'clean body'"
+
+# 75. Regression guard — a GENUINELY different private project's name must
+#     still block. The owner exemption must not widen into "any name is
+#     fine now".
+run_case "#1387: an unrelated private project name still blocks (owner exemption is narrow)" \
+  2 "project name: curios-dog" \
+  "gh issue create --repo me2resh/apexyard --title 'fix' --body 'discovered during curios-dog rebuild'"
+
+# 76. Regression guard — the target's own bare repo name exemption (pre-
+#     existing, #1387 must not disturb it) still works alongside the new
+#     owner exemption.
+run_case "#1387: the target's own bare repo name still exempt (pre-existing behaviour preserved)" \
+  0 "" \
+  "gh issue create --repo me2resh/apexyard --title 'apexyard: fix release notes' --body 'clean body'"
+
+# 77. Regression guard — an owner mention alongside a GENUINE leak in the
+#     same body must still catch the real leak. The exemption skips only
+#     the owner's own name entry; it must not short-circuit scanning the
+#     rest of the body for an unrelated private project.
+run_case "#1387: owner mention plus a real leak in the same body still blocks on the real leak" \
+  2 "project name: curios-dog" \
+  "gh issue create --repo me2resh/apexyard --title 'fix' --body 'filed against me2resh/apexyard; also discovered during curios-dog rebuild'"
+
+# 77b. Rex code-review finding (PR #1400) — the issue asked to KEEP the block
+#      when the owner-equal name appears alone (no `@`, no `/`). The exemption
+#      strips only the `@owner` and `owner/<repo-slug>` forms; a bare,
+#      standalone mention must still block exactly like any other registered
+#      private project's name. This is the narrowing the review requested.
+run_case "#1387: a BARE owner-name mention (no @, no /) still blocks (issue's own scope)" \
+  2 "project name: me2resh" \
+  "gh issue create --repo me2resh/apexyard --title 'fix' --body 'the me2resh project is failing'"
+
+# 77c-77e. me2resh/apexyard#1400 security re-review, LOW 1 — a hyphen-joined
+#          form of the owner-equal name used to bypass the owner branch: its
+#          bare-mention check treated `-` as a word character, so
+#          `me2resh-tool` or `foo-me2resh` read as one token that never
+#          matched the standalone-word pattern. The GENERIC per-name check a
+#          few lines below (`grep -qiwE`, unaffected by this PR) already
+#          treats `-` as a boundary, so the exact same text still blocked
+#          for any OTHER registered name — the owner branch alone had this
+#          gap. Fixed by narrowing the bare-mention boundary class to match
+#          `grep -w`'s own word-character set.
+run_case "#1400 LOW1: hyphen-suffixed owner-equal name still blocks (owner-tool)" \
+  2 "project name: me2resh" \
+  "gh issue create --repo me2resh/apexyard --title 'fix' --body 'ship the me2resh-tool update'"
+
+run_case "#1400 LOW1: hyphen-prefixed owner-equal name still blocks (foo-owner)" \
+  2 "project name: me2resh" \
+  "gh issue create --repo me2resh/apexyard --title 'fix' --body 'the foo-me2resh integration failed'"
+
+run_case "#1400 LOW1: Rex A1 repro — 'the OWNER-internal rebuild failed' still blocks" \
+  2 "project name: me2resh" \
+  "gh issue create --repo me2resh/apexyard --title 'fix' --body 'the me2resh-internal rebuild failed'"
+
+# 77f. me2resh/apexyard#1400 security re-review, LOW 2 — the owner/<slug>
+#      strip expression's slug class included `.`, so a second, glued
+#      mention right after a dot (`owner/repo.owner`) was captured INSIDE
+#      the stripped slug and disappeared along with the safe `owner/repo`
+#      form. Removing `.` from the slug class stops the capture at the dot,
+#      leaving the glued mention for the bare-mention check to catch.
+run_case "#1400 LOW2: owner/repo.owner glued mention still blocks (dot no longer in slug class)" \
+  2 "project name: me2resh" \
+  "gh issue create --repo me2resh/apexyard --title 'fix' --body 'cross-posted as me2resh/apexyard.me2resh for tracking'"
+
+# ---------------------------------------------------------------------------
+# 78-81. me2resh/apexyard#1206 (Hakim MEDIUM) — the --flag=value equals form.
+# extract_flag_value/extract_path_flag both require a space between a flag
+# and its value; the equals form matched neither, so a leak sent through it
+# reached the empty-haystack short-circuit unscanned. --input already fixed
+# this exact gap for itself (#1070); --title/--subject/--body/--body-file
+# did not carry the same fix.
+# ---------------------------------------------------------------------------
+
+run_case "#1206: --body=value equals form → blocked, not silently unscanned" \
+  2 "flag=value form is not scanned" \
+  "gh issue create --repo me2resh/apexyard --title=t --body=leaked"
+
+run_case "#1206: --title=value equals form → blocked" \
+  2 "flag=value form is not scanned" \
+  "gh issue create --repo me2resh/apexyard --title=leaked --body 'clean'"
+
+run_case "#1206: --subject=value equals form on gh pr merge → blocked" \
+  2 "flag=value form is not scanned" \
+  "gh pr merge 12 --repo me2resh/apexyard --squash --subject=leaked"
+
+run_case "#1206: --body-file=path equals form → blocked" \
+  2 "flag=value form is not scanned" \
+  "gh issue create --repo me2resh/apexyard --title t --body-file=$WRAPPER_CREATE_FILE"
+
+# Regression guard — the space form must still work exactly as before;
+# the equals-form check must not swallow ordinary, correctly-parsed writes.
+run_case "#1206: equals-form check does not affect the ordinary space form" \
+  2 "project name: widget-forge" \
+  "gh issue create --repo me2resh/apexyard --title t --body 'discovered during widget-forge rebuild'"
+
+# ---------------------------------------------------------------------------
+# 76. me2resh/apexyard#1206 (Hakim MEDIUM, root-caused) — the truncation
+# refusal that fires on a chained gh pr merge is BODY_TRUNCATED, not
+# TITLE_TRUNCATED. Verified directly against dev: this exact command with
+# --subject removed entirely still diverges dev=0 (gh pr merge was not a
+# scanned shape at all) vs this branch=2 (gh pr merge's own --body is now
+# correctly subject to the #1068 chained-command refusal every other shape
+# already has). The message must name --body, not --subject, when --subject
+# never appeared in the command at all.
+# ---------------------------------------------------------------------------
+run_case "#1206: gh pr merge body-only chain (no --subject at all) names --body, not --subject" \
+  2 "could not safely determine where a --body value ends" \
+  "gh pr merge 12 --repo me2resh/apexyard --squash --body \"nothing unusual here\" && gh pr merge list --repo other-org/other-repo"
 
 # ---------------------------------------------------------------------------
 # Portability lock: no ERE intervals in the hook's awk program.
